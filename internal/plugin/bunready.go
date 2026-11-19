@@ -21,6 +21,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -292,6 +293,20 @@ func bunFromPath(ctx context.Context) (string, bool) {
 		return exe, true
 	}
 	return "", false
+}
+
+// bunOnUnstartable is another Bun on this machine to run plugins on when
+// the one magpie downloaded can't be loaded by this Windows (0xc0000139).
+// Reader-installed builds, such as one made for Windows 7/8/8.1, are taken
+// from PATH or ~/.bun/bin with no setting: bunFromPath checks that one runs
+// here and makes it the one magpie keeps using. "" when none of them runs,
+// leaving the caller to say why the first Bun couldn't start.
+func bunOnUnstartable(ctx context.Context, err error) (string, bool) {
+	var ue *BunUnstartableError
+	if !errors.As(err, &ue) || ue.Why != "windows" || os.Getenv("MAGPIE_BUN") != "" {
+		return "", false
+	}
+	return bunFromPath(ctx)
 }
 
 func copyBun(from, to string) error {

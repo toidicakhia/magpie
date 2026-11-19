@@ -1043,6 +1043,16 @@ func start(ctx context.Context) (*host, error) {
 	h, crashed, err := startOn(ctx, bun)
 	if crashed {
 		err = whyDied(ctx, bun, err)
+		// Windows too old for this Bun isn't the end of plugins: a
+		// compatible Bun already on this machine takes over, without a
+		// setting or a download of one that can't start here either
+		if other, ok := bunOnUnstartable(ctx, err); ok {
+			bun = other
+			h, crashed, err = startOn(ctx, bun)
+			if crashed {
+				err = whyDied(ctx, bun, err)
+			}
+		}
 	}
 	if err == nil || !crashed || os.Getenv("MAGPIE_BUN") != "" {
 		// a Bun that can't be started at all isn't fallen back from: the

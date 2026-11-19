@@ -132,8 +132,9 @@ var envBunVersion = map[string]string{}
 
 var bunVersionRe = lazyre.New(`^\d+\.\d+\.\d+$`)
 
-// bunReported is the version a bun says it is, "" when it won't say.
-func bunReported(exe string) string {
+// bunReported is the version a bun says it is, "" when it won't say. A var
+// for tests, which can't make a fake bun answer on every platform.
+var bunReported = func(exe string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := command(ctx, exe, "--version").Output()

@@ -207,7 +207,7 @@ type BunUnstartableError struct {
 
 func (e *BunUnstartableError) Error() string {
 	if e.Why == "windows" {
-		return fmt.Sprintf("Bun can't start on this version of Windows: it needs Windows 10 version 1809 or later, or Windows Server 2019 or later, and this one lacks a function it uses (%s exited with 0xc0000139, entry point not found). Update Windows to run plugins, or set MAGPIE_BUN to a bun that runs here: %v", e.Bun, e.Err)
+		return fmt.Sprintf("Bun can't start on this version of Windows: it needs Windows 10 version 1809 or later, or Windows Server 2019 or later, and this one lacks a function it uses (%s exited with 0xc0000139, entry point not found). Update Windows to run plugins, or install a compatible Bun as bun on PATH — magpie finds and uses one there on its own — or set MAGPIE_BUN to a bun that runs here: %v", e.Bun, e.Err)
 	}
 	return fmt.Sprintf("Bun can't start on this computer's processor: it lacks an instruction Bun uses (%s: %v). Bun's x64 build needs SSE4.2 (an Intel or AMD processor from 2008 on; in a virtual machine, a CPU type that passes it through). Run magpie on such a processor to run plugins, or set MAGPIE_BUN to a bun that runs here", e.Bun, e.Err)
 }

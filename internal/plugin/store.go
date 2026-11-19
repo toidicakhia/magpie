@@ -811,6 +811,12 @@ func install(ctx context.Context, spec string) error {
 	mendDist(ctx, bun)
 	before := depsNow()
 	err = bunAdd(ctx, bun, spec)
+	// a Windows too old for the downloaded Bun isn't the end of an
+	// install: another Bun on this machine that runs here takes over
+	if other, ok := bunOnUnstartable(ctx, err); ok {
+		bun = other
+		err = bunAdd(ctx, bun, spec)
+	}
 	// a @magpie-community package or version npm doesn't have (a new
 	// one waits for an owner to publish it there) comes from the
 	// community repo's dist branch; one Bun's minimumReleaseAge holds
@@ -1055,6 +1061,10 @@ func reinstall(ctx context.Context, spec string) error {
 	}
 	was := GitCommit(spec)
 	out, err := runBun(ctx, bun, "update", "--ignore-scripts", name)
+	if other, ok := bunOnUnstartable(ctx, err); ok {
+		bun = other
+		out, err = runBun(ctx, bun, "update", "--ignore-scripts", name)
+	}
 	if err != nil {
 		if hint := missingLibs(string(out)); hint != "" {
 			return fmt.Errorf("bun update %s: %s: %w", name, hint, err)
