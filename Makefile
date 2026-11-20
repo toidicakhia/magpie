@@ -32,7 +32,7 @@ ifeq ($(shell go env GOOS),android)
   TAGS = nogui
 endif
 
-.PHONY: assets-pack conpty-pair build-release build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once
+.PHONY: assets-pack conpty-pair build-release build cli install test test-ui app icons release release-cli release-windows installer-windows release-linux clean dev dev-once
 
 # A release build embeds the UI's files as one zip instead of the tree
 # (internal/gui/assets_packed.go): a Windows or Linux download is the raw
@@ -147,6 +147,12 @@ release-windows: assets-pack conpty-pair
 		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build -trimpath -buildvcs=false -ldflags="-s -w" -o internal/update/launcher-$$arch.com ./internal/update/launcher || exit 1; \
 		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build -tags production,comlauncher,packedassets,conptypair -trimpath -ldflags="$(LDFLAGS) -H windowsgui" -o dist/magpie-windows-$$arch.exe . || exit 1; \
 	done; rm -f rsrc_windows_*.syso internal/update/launcher-*.com
+
+# The optional Windows installer: the release app, put in place by setup,
+# which then opens it so magpie's own first start makes the shortcut,
+# Installed apps entry and magpie.com (docs/subsystems/gui-shell.md).
+installer-windows:
+	@go run ./build/installersetup
 
 # The desktop app for Linux links GTK 3 and WebKitGTK 4.1 through cgo, so it
 # is built natively, one arch per machine.

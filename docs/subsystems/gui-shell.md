@@ -1434,8 +1434,9 @@ blank with the error in the footer for 8 s (WaiooT on X,
 
 ### Where Windows installs magpie
 
-There is no installer: the Windows exe opened from Downloads, the Desktop
+The app installs itself: the Windows exe opened from Downloads, the Desktop
 or a temp folder installs itself (`update.Settle`, called from `gui.Run`).
+The release has no installer, but one can be built (below).
 So does one still named as the site's download (`magpie-windows-amd64.exe`,
 `… (1).exe`; `downloadName`) anywhere else, as a browser saving to
 `D:\下载` or a download moved into a folder and updated in place there
@@ -1478,6 +1479,19 @@ v0.1.4166's release check waited on the dialog with no gateway
 `TestSettleOffersTheChosenFolderAgain`, `TestInstallableRefuses` in
 [`install_test.go`](../../internal/update/install_test.go),
 `TestInstallWordsEveryLanguage` and `TestInstallDialogSaysTheDownloadCanGo`.
+
+`make installer-windows` (`go run ./build/installersetup`) builds the
+optional `dist/magpie-setup-<version>-windows-<arch>.exe`: the release app,
+gzipped and appended to the small setup program in
+[`build/windows/installer`](../../build/windows/installer/main.go). Setup
+does only what the app can't do for itself once installed: ask where to put
+it (`/DIR=` otherwise the default above), write the exe there, put that
+folder first on the user's PATH and open it. It won't put an older build
+over a newer one, and it makes no Start menu shortcut, App Paths, Installed
+apps entry or magpie.com: the app's first start does that
+(`shortcut.Ensure`, `update.EnsureCompanion`), so setup and a download
+opened from Downloads end with the same install. `/S` installs without
+asking, and `/NOLAUNCH` leaves the app closed.
 
 ## Verification
 
