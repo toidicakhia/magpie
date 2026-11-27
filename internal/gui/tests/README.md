@@ -35,6 +35,13 @@ password, escaped and non-UTF-8 credentials, a login saved in the address
 before loading into the fields, masked addresses/status, clearing
 authentication, Tab and Escape, mode switches, and narrow windows in all
 five languages on Chromium and WebKit.
+
+`agy-usage-reason.test.cjs` checks that agy-cli's own reasons for no quota
+reading this time (sign-in due to be renewed, still reading, too slow, no
+agy, too old) are said in the user's words on the account's row, the Usage
+card and the tray card, and beside a kept reading's "As of" line, in all five
+languages on Chromium and WebKit. The API is faked.
+
 ## Installed desktop fonts
 
 `fonts.test.cjs` exercises the interface/code font controls with installed
@@ -160,6 +167,30 @@ node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs
 ```
 
 ## Other Browser Regressions
+
+`artifacts-page.test.cjs` checks Work › Artifacts (docs/subsystems/artifacts.md):
+its button after Library's and gone with the Library off, a row per
+artifact newest first naming the agent and, with more than one, its
+versions; a click opens the newest, the menu copies its link, opens an
+earlier version from the app's menu (none with one version) and deletes it
+after asking, with no click opening the row twice. None says so, and a
+find field shows from 8. Every language, both engines, a window at 1000
+and 560 and a browser at 420, with no sideways scroll and the API faked.
+
+`artifact-runtime.test.cjs` checks the page runtime (internal/artifact/runtime.js)
+as a page written for claude.ai's meets it: window.claude before the page's
+scripts, db and user resolved and the rest null, a bad path a TypeError at
+once, refused calls rejected with their code, every call text/plain from
+Origin null with the page's token, onSnapshot following the page's writes
+and the agent's, a page that declares artifact publishing itself (the
+whole page reloads every open view, files keep the saving view running and
+build on its version, a conflict sends the loser to the winner, ifMatch's
+answer brings another's save), publish: false refusing with nothing sent,
+a page that declares assets uploading a file as its bytes (options.type
+over the blob's), showing it in an <img> from /_blob/, listing and
+deleting it, with its own mistakes refused before any request, and a
+shared copy resolving every capability null, assets too. Both engines, under the
+sandbox CSP, the store faked.
 
 `mask-alert.test.cjs` checks Insights › Masking's Masking alert (Must2333 on
 X): after the page's list and not in Settings › Usage (nb5p on Discord), Off
@@ -1528,6 +1559,25 @@ found skill with a byte copy in another agent shows both agents' icons and
 no "differs in"; one that really differs still says so. Chromium and
 WebKit, in English and Chinese, with `/api/plugins` faked.
 
+`own-skill-all.test.cjs` lists four agents' own skills by the library's
+names (zysicyj on X: ten agents, a click each): the warning's heading has
+one "All agents" menu, whose "Use the library's" and "Keep each agent's
+own" post `skills/use-library-all` and `skills/keep-own-all` with every
+agent's names; Claude Desktop's still stand after "use", with no menu.
+One agent's own Keep says what it did, not the other agents' own skills
+still listed. One agent alone, or a write that failed beside them, gets
+no menu. All five languages, Chromium and WebKit, at 980px and 360px; the API is faked.
+
+`library-sections.test.cjs` hides the Library's tabs from Plugins ›
+Built-in (lantian_x on X): the Library row's Sections link opens a menu of
+the tabs, each ticked; unticking Hooks and Environment variables posts the
+plugin's `hide` setting at once and the link says two are hidden; the
+Library page's tabs and, from 1024 points, the sidebar's list leave them
+out, and Hooks, open last, gives way to Instructions. The last tab shown
+can't be hidden and nothing is posted then; nothing but the setting is
+posted at all. Every language, Chromium and WebKit, at 1100, 800 and 420
+points, with the API faked.
+
 `library-problems-hide.test.cjs` opens the Library with Grok Build's
 AGENTS.md failing to stat at every sync (Zachary-wW, #3745), the API
 answering as `library.go` does, the error texts as magpie's own sync gave
@@ -2212,6 +2262,12 @@ line, the 2 days / Cycle control turning every card without moving the page,
 no curve without readings, the theme's chart colours in light and dark, and
 the tray card's thin current-cycle line, in Chinese and English.
 
+`quota-window-segments.test.cjs` checks that a quota window's figure keeps
+every " · " piece (#7396): a plugin's display with four, a text row, a
+metered window whose display has one of its own, one and two pieces as
+before, no readings, and a narrow window wrapping at a · rather than cut
+short. English and Chinese, Chromium and WebKit, the API faked.
+
 `balance-curve.test.cjs` checks a key's balance over time on the Usage page:
 its readings as a line, the least-squares line since the last top-up dashed
 on to zero, "Runs out in 3d at this pace" and the spend a day, a click (or
@@ -2838,3 +2894,41 @@ tone, #26251E. It checks that the row draws that picture as a mask in the
 text colour, and that it shows in both themes, all five languages, at 980px
 and 420px, in Chromium and WebKit (chen2652). `ARTIFACT_DIR` keeps the row's
 screenshots.
+
+The community badge's shield and the card's counts (star, person, heart,
+downloads) are held level by `icon-text-align.test.cjs`, with every other
+glyph beside words. `plugin-badge-align.test.cjs` is gone (11-23): it
+measured the icon against the words' whole ink, descenders and "/week"
+included, so it asked for a .1em nudge down that sat the person 1.5 device
+px below its count in the real app. Against the digits, headless Chromium
+and WebKit read the same row 0.4 to 1.3px apart by language (each picks
+its own font for the digits), so a screenshot bound of 1px held either way.
+
+## Requests' In without the cache
+
+`ledger-in-uncached.test.cjs` checks Settings › Usage › Advanced › In
+without cache (JonahFu on X): folded and Off at first, in the app and in a
+page served to a browser; On saves `inUncached`, another save keeps it, Off
+saves false, and no click moves the page. With it on, the Requests list's In
+is the vendor's in beside the cache columns and with them left out
+(`.led.tight`), and the header says so; with it off, the whole prompt as
+`ledger-in-whole` has it. Every language, 1100 and 390 wide, Chromium and
+WebKit; the API is faked.
+
+## A page whose frames are slow still scrolls
+
+`view-slow-frames.test.cjs` makes every frame take 400ms, the one right
+after a wheel or a lift too, as WebKitGTK drawing the Library's long MCP
+list on a slow Linux machine did (aublurer on X, Omarchy). The wheel still
+moves the Library's MCP list and the Agents page as far as it asks, the
+scrollbar's drag follows the pointer (lifted at once, as WebKit sends its
+scrolls only after the lift), the wheel goes back up once frames are
+fast again, a scroll by code at rest is still put back, and Page Down whose
+own frame takes 600ms (past the 400ms a key's window lasts) still scrolls
+the page, all of WebKit's animated scroll. Every language,
+Chromium and WebKit; the API is faked. `MAGPIE_SLOW_ASSETS` points it at an
+older assets folder, where the wheel leaves the page at 0.
+
+```sh
+node --test internal/gui/tests/view-slow-frames.test.cjs
+```

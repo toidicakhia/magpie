@@ -353,7 +353,7 @@ func identityOf(k Key, keys []Key, now time.Time) (Identity, error) {
 		return Identity{}, &Refused{Why: fmt.Sprintf("the gateway key %q names an account group, and magpie can't read its account groups now: %v", k.Name, err)}
 	}
 	k.Accounts = accounts
-	who := Identity{KeyID: k.ID, KeyName: k.Name, Limit: k.Limit, More: k.More, Models: HeldModels(k.Models, k.Accounts), Aliases: k.Aliases, AccountModels: len(k.Models) == 0 && picksAccounts(k.Accounts), Accounts: k.Accounts, MCP: k.MCP, Quotas: k.Quotas, ReadOnly: k.ReadOnly, Browser: k.Browser, Admin: adminOf(k), Memory: memoryOf(k), Expires: k.Expires, Issues: k.Issues && k.Issuer == "" && !k.Browser, MaxConcurrency: k.MaxConcurrency, ServiceTier: k.ServiceTier, Redact: k.Redact}
+	who := Identity{KeyID: k.ID, KeyName: k.Name, Limit: k.Limit, More: k.More, Models: HeldModels(k.Models, k.Accounts), Aliases: k.Aliases, AccountModels: len(k.Models) == 0 && picksAccounts(k.Accounts), Accounts: k.Accounts, MCP: k.MCP, Quotas: k.Quotas, ReadOnly: k.ReadOnly, Browser: k.Browser, Admin: adminOf(k), Memory: memoryOf(k), Expires: k.Expires, Issues: k.Issues && k.Issuer == "" && !k.Browser, MaxConcurrency: k.MaxConcurrency, ServiceTier: k.ServiceTier, Redact: k.Redact, Routing: k.Routing}
 	// the default key as Default tells it: marked LAN, or the id the
 	// settings name (settings read only for an unmarked key)
 	who.Default = k.LAN || (k.ID != "" && settings.Shared().LANKeyID == k.ID)
@@ -373,7 +373,11 @@ func identityOf(k Key, keys []Key, now time.Time) (Identity, error) {
 	}
 	pModels := HeldModels(p.Models, p.Accounts)
 	who.AccountModels = len(k.Models) == 0 && len(p.Models) == 0 && (picksAccounts(k.Accounts) || picksAccounts(p.Accounts))
-	if len(pModels) > 0 {
+	switch {
+	case who.ModelsOff() || slices.Equal(pModels, []string{NoModels}):
+		// no model, either's: none of the two's
+		who.Models, who.AccountModels = []string{NoModels}, false
+	case len(pModels) > 0:
 		if who.Models = foldModels(who.Models, pModels); len(who.Models) == 0 {
 			return Identity{}, &Refused{Why: fmt.Sprintf("the gateway key %q may use none of its models now: the key it was issued under no longer lets it", k.Name)}
 		}
@@ -385,6 +389,9 @@ func identityOf(k Key, keys []Key, now time.Time) (Identity, error) {
 	// masking an issuer holds on holds for what it issued; off is the key's own
 	if p.Redact == RedactOn {
 		who.Redact = RedactOn
+	}
+	if who.Routing == "" {
+		who.Routing = p.Routing
 	}
 	if !p.Expires.IsZero() && (who.Expires.IsZero() || p.Expires.Before(who.Expires)) {
 		who.Expires = p.Expires
@@ -404,7 +411,8 @@ func identityOf(k Key, keys []Key, now time.Time) (Identity, error) {
 // expression m is covered only by itself or by "*", as no glob can be
 // shown to take all it names.
 func covered(patterns []string, m string) bool {
-	if len(patterns) == 0 {
+	if len(patterns) == 0 || m == NoModels {
+		// no model is within every list
 		return true
 	}
 	if IsPattern(m) {

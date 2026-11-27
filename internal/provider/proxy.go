@@ -35,6 +35,10 @@ func (p Provider) Via(ctx context.Context) context.Context {
 	if len(p.Resolve) > 0 && p.TakesResolve() {
 		ctx = netproxy.WithResolve(ctx, p.Resolve)
 	}
+	if roots := p.failoverRoots(); len(roots) > 1 {
+		ctx = netproxy.WithFailover(ctx, roots...)
+		ctx = netproxy.WithVouch(ctx, p.vouch())
+	}
 	cert, key, ca := p.ClientCert, p.ClientKey, p.ServerCA
 	if !p.TakesClientCert() {
 		cert, key, ca = "", "", ""
@@ -95,6 +99,20 @@ func ProxyOfLogin(id, user string) string {
 		return v
 	}
 	return s.Proxy
+}
+
+// ClaudeProxies are the distinct proxy choices the Claude subscription's
+// accounts send their requests through (ProxyOfLogin): what
+// internal/egress looks the way out up through. No account, none: a user
+// without one is never looked up for.
+func ClaudeProxies() []string {
+	var out []string
+	for _, l := range Logins("claude") {
+		if c := strings.TrimSpace(ProxyOfLogin("claude", l.User)); !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // Via is ctx for requests made on behalf of the provider or signed-in

@@ -118,10 +118,16 @@ type pluginPanel struct {
 	Titles map[string]string `json:"titles,omitempty"`
 	URL    string            `json:"url"`   // the panel, under pluginPagePrefix
 	Reads  []string          `json:"reads"` // what it may read, of plugin.PageReads
-	token  string
-	dir    string
-	file   string
-	hosted bool
+	// Providers are, for a provider panel of a plugin that gives
+	// providers, the ids magpie knows them by: its panels are in their
+	// editors only. A plugin that gives none has its panels in every
+	// provider's editor. Marvis's first-line panel was in every provider's
+	// editor, Kimi's among them, and in none of Marvis's own (11-21).
+	Providers []string `json:"providers,omitempty"`
+	token     string
+	dir       string
+	file      string
+	hosted    bool
 }
 
 // pageKeyChars are what a window page's key can't have
@@ -133,6 +139,19 @@ var pageKeyChars = strings.NewReplacer("@", "", "/", "-", ".", "-", "_", "-", " 
 func windowParts() (pages []pluginPage, panels []pluginPanel) {
 	seen := map[string]bool{}
 	replaced := map[string]bool{}
+	// the providers each plugin gave when last listed, read once and only
+	// when a panel is a provider's
+	var gives map[string][]string
+	providersOf := func(spec string) []string {
+		if gives == nil {
+			gives = map[string][]string{}
+			ps, _ := plugin.Listed()
+			for _, pp := range ps {
+				gives[pp.Spec] = append(gives[pp.Spec], provider.PluginID(pp.ID))
+			}
+		}
+		return gives[spec]
+	}
 	for _, e := range plugin.Load().Plugins {
 		if e.Off {
 			continue
@@ -192,6 +211,9 @@ func windowParts() (pages []pluginPage, panels []pluginPanel) {
 				token: tok, dir: spec.Dir, URL: pluginPagePrefix + tok + "/" + filepath.ToSlash(rel), file: filepath.ToSlash(rel), hosted: !only}
 			if p.Title == "" {
 				p.Title = cmp.Or(plugin.InstalledName(e.Spec), plugin.ShortName(name))
+			}
+			if p.Slot == "provider" {
+				p.Providers = providersOf(e.Spec)
 			}
 			panels = append(panels, p)
 		}
@@ -661,16 +683,32 @@ func pageRead(read string, params map[string]any) (any, error) {
 			Cost   float64   `json:"cost"`
 			Models []model   `json:"models"`
 		}{Period: string(period), Since: s.Since, Calls: s.Calls, Errors: s.Errors, Input: s.Input, Output: s.Output, Cache: s.CacheRead, Cost: s.Cost, Models: []model{}}
-		for i, g := range s.Models {
-			if i == 20 {
-				break
-			}
-			m := g.Model
-			if m == "" {
-				m = g.ID
-			}
-			out.Models = append(out.Models, model{Model: m, Calls: g.Calls, Input: g.Input, Output: g.Output, Cost: g.Cost})
+		// The ledger groups by provider, model and endpoint. Combine every
+		// row for the name the plugin sees before choosing the top 20.
+		byName := make(map[string]model)
+		for _, g := range s.Models {
+			name := cmp.Or(g.Model, g.ID)
+			m := byName[name]
+			m.Model = name
+			m.Calls += g.Calls
+			m.Input += g.Input
+			m.Output += g.Output
+			m.Cost += g.Cost
+			byName[name] = m
 		}
+		for _, m := range byName {
+			out.Models = append(out.Models, m)
+		}
+		slices.SortFunc(out.Models, func(a, b model) int {
+			if n := cmp.Compare(b.Input+b.Output, a.Input+a.Output); n != 0 {
+				return n
+			}
+			if n := cmp.Compare(b.Calls, a.Calls); n != 0 {
+				return n
+			}
+			return cmp.Compare(a.Model, b.Model)
+		})
+		out.Models = out.Models[:min(len(out.Models), 20)]
 		return out, nil
 	}
 	return nil, fmt.Errorf("no read %q", read)

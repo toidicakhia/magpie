@@ -3,6 +3,7 @@ package library
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -340,5 +341,125 @@ func TestNativeClaudePlugins(t *testing.T) {
 	}
 	if after := dirDump(t, cc); after != before {
 		t.Errorf("reading changed Claude's folder")
+	}
+}
+
+// #7244 follow-up (jinpwng): a Codex plugin the user installed and turned
+// off, turned on in one project's .codex/config.toml, is listed with what
+// each project makes of it. Codex 0.171's config/read gives the project's
+// value once the project is trusted (projects."<dir>".trust_level in the
+// user's config.toml, the main checkout's for a linked worktree, the
+// repository's for a folder in it) and the user's while it isn't; a
+// project that says nothing of the plugin isn't listed.
+func TestNativeCodexPluginPerProject(t *testing.T) {
+	home, _ := nativeCodexHome(t)
+	root := t.TempDir()
+	app, lab, quiet := filepath.Join(root, "app"), filepath.Join(root, "lab"), filepath.Join(root, "quiet")
+	web := filepath.Join(app, "web")
+	for _, d := range []string{app, lab, quiet} {
+		gitInit(t, d)
+	}
+	on := "[plugins.\"chrome@openai-bundled\"]\nenabled = true\n"
+	write(t, filepath.Join(app, ".codex", "config.toml"), on)
+	write(t, filepath.Join(lab, ".codex", "config.toml"), on)
+	// git worktree add ../app-wt, with its own copy of the config
+	wt := filepath.Join(root, "app-wt")
+	own := filepath.Join(app, ".git", "worktrees", "app-wt")
+	write(t, filepath.Join(wt, ".git"), "gitdir: "+own+"\n")
+	write(t, filepath.Join(own, "gitdir"), filepath.Join(wt, ".git")+"\n")
+	write(t, filepath.Join(own, "commondir"), "../..\n")
+	write(t, filepath.Join(wt, ".codex", "config.toml"), on)
+	conf := filepath.Join(home, ".codex", "config.toml")
+	write(t, conf, read(t, conf)+"\n[projects."+strconv.Quote(app)+"]\ntrust_level = \"trusted\"\n\n[projects."+strconv.Quote(lab)+"]\ntrust_level = \"untrusted\"\n")
+	for _, d := range []string{web, lab, quiet, wt} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ok(t)(AddProject(d))
+	}
+
+	p := nativeOf(t, ReadNative(), "codex", "chrome")
+	if p.Enabled == nil || *p.Enabled {
+		t.Fatalf("the user install isn't off: %v", p.Enabled)
+	}
+	got := map[string]NativeInProject{}
+	for _, in := range p.InProjects {
+		got[in.Dir] = in
+	}
+	is := func(b *bool, want bool) bool { return b != nil && *b == want }
+	if in, ok := got[web]; !ok || !in.Trusted || !is(in.Set, true) || !is(in.Effective, true) {
+		t.Errorf("a folder of the trusted repository: %+v (%v)", in, ok)
+	}
+	if in, ok := got[lab]; !ok || in.Trusted || !is(in.Set, true) || !is(in.Effective, false) {
+		t.Errorf("the untrusted project: %+v (%v)", in, ok)
+	}
+	if _, ok := got[quiet]; ok {
+		t.Error("a project that says nothing of it is listed")
+	}
+	// a linked worktree, registered by itself, is trusted by its main
+	// checkout's entry
+	if in, ok := got[wt]; !ok || !in.Trusted || !is(in.Effective, true) {
+		t.Errorf("the trusted repository's worktree: %+v", in)
+	}
+	if len(p.InProjects) == 0 {
+		t.Fatal("no project listed")
+	}
+	// the other plugins no project names stay as they were
+	if a := nativeOf(t, ReadNative(), "codex", "codex-app-tools"); len(a.InProjects) != 0 {
+		t.Errorf("codex-app-tools: %+v", a.InProjects)
+	}
+
+	// Codex on Windows writes and looks up a project's key in lower case
+	// (c:\users\…), and takes a key that differs in ASCII case only;
+	// elsewhere a key is matched as written (#7786)
+	base, _, _ := strings.Cut(read(t, conf), "\n[projects.")
+	write(t, conf, base+"\n[projects."+strconv.Quote(strings.ToUpper(app[:1])+strings.ToLower(app[1:]))+"]\ntrust_level = \"trusted\"\n")
+	for _, fold := range []bool{true, false} {
+		was := codexFoldsKeys
+		codexFoldsKeys = fold
+		in := got[web]
+		for _, i := range nativeOf(t, ReadNative(), "codex", "chrome").InProjects {
+			if i.Dir == web {
+				in = i
+			}
+		}
+		codexFoldsKeys = was
+		if in.Trusted != fold || !is(in.Effective, fold) {
+			t.Errorf("a key in other case, folded %v: %+v", fold, in)
+		}
+	}
+}
+
+// Codex's lookup on Windows (project_trust_for_lookup_key): the key in
+// lower case first, else the least key that differs in ASCII case only;
+// a key differing beyond ASCII case is another folder.
+func TestCodexTrustFoldsASCIICase(t *testing.T) {
+	type lvl = struct {
+		TrustLevel string `toml:"trust_level"`
+	}
+	was := codexFoldsKeys
+	t.Cleanup(func() { codexFoldsKeys = was })
+	trust := map[string]lvl{`C:\Work\App`: {"untrusted"}, `C:\WORK\APP`: {"trusted"}, `c:\work\Ä`: {"trusted"}, `c:\work\none`: {}}
+	codexFoldsKeys = true
+	for key, want := range map[string]string{
+		`c:\work\app`:  "trusted", // C:\WORK\APP < C:\Work\App
+		`C:\work\APP`:  "trusted",
+		`c:\work\ä`:    "",
+		`C:\Work\None`: "",
+	} {
+		if got := codexTrust(trust, key); got != want {
+			t.Errorf("folded %q: %q, want %q", key, got, want)
+		}
+	}
+	trust[`c:\work\app`] = lvl{"untrusted"}
+	if got := codexTrust(trust, `C:\Work\APP`); got != "untrusted" {
+		t.Errorf("the lower-case key goes first: %q", got)
+	}
+	codexFoldsKeys = false
+	if got := codexTrust(trust, `c:\work\APP`); got != "" {
+		t.Errorf("unfolded: %q", got)
+	}
+	if got := codexTrust(trust, `C:\Work\App`); got != "untrusted" {
+		t.Errorf("unfolded, as written: %q", got)
 	}
 }

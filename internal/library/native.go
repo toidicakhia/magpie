@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -85,6 +86,23 @@ type NativePlugin struct {
 	// Loaded is always "unknown": only a session shows what was loaded
 	Loaded string       `json:"loaded"`
 	Parts  []NativePart `json:"parts"`
+	// InProjects is, for a Codex plugin, what each of the library's
+	// projects makes of it (#7244)
+	InProjects []NativeInProject `json:"inProjects,omitempty"`
+}
+
+// NativeInProject is a user-installed Codex plugin as one project has it:
+// the project's .codex/config.toml may turn it on or off, which Codex
+// applies once the project is trusted. Effective is what that comes to by
+// the files (nil when neither says); whether a session loaded it stays
+// unknown.
+type NativeInProject struct {
+	Dir string `json:"dir"`
+	// Set is what the project's own config says; nil when it says nothing
+	Set *bool `json:"set,omitempty"`
+	// Trusted is the user config's trust_level for the project
+	Trusted   bool  `json:"trusted"`
+	Effective *bool `json:"effective,omitempty"`
 }
 
 const nativePartsMax = 500
@@ -106,6 +124,9 @@ func ReadNative() []NativePlugin {
 type codexConf struct {
 	Plugins      map[string]struct{ Enabled *bool } `toml:"plugins"`
 	Marketplaces map[string]struct{ Source string } `toml:"marketplaces"`
+	Projects     map[string]struct {
+		TrustLevel string `toml:"trust_level"`
+	} `toml:"projects"`
 }
 
 var codexManifests = []string{".codex-plugin", ".claude-plugin", ".cursor-plugin"}
@@ -122,6 +143,10 @@ func codexNative() []NativePlugin {
 	cache := filepath.Join(home, "plugins", "cache")
 	var out []NativePlugin
 	markets, _ := os.ReadDir(cache)
+	var projects []codexProject
+	if len(markets) > 0 {
+		projects = codexProjects(conf.Projects)
+	}
 	for _, m := range markets {
 		if !m.IsDir() || strings.HasPrefix(m.Name(), ".") {
 			continue
@@ -146,10 +171,139 @@ func codexNative() []NativePlugin {
 			if s := conf.Marketplaces[m.Name()].Source; s != "" {
 				p.Source = m.Name() + " (" + s + ")"
 			}
-			p.Enabled = conf.Plugins[pl.Name()+"@"+m.Name()].Enabled
+			id := pl.Name() + "@" + m.Name()
+			p.Enabled = conf.Plugins[id].Enabled
 			p.Parts = codexParts(root, man)
+			for _, pr := range projects {
+				// a project that says nothing of it has the user's
+				if set := pr.plugins[id]; set != nil {
+					in := NativeInProject{Dir: pr.dir, Set: set, Trusted: pr.trusted, Effective: p.Enabled}
+					if pr.trusted {
+						in.Effective = set
+					}
+					p.InProjects = append(p.InProjects, in)
+				}
+			}
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// codexProject is what a project's .codex/config.toml files say of
+// plugins, and whether Codex trusts the project.
+type codexProject struct {
+	dir     string
+	trusted bool
+	plugins map[string]*bool
+}
+
+// codexProjects reads each of the library's projects as Codex does
+// (codex-rs config loader, 0.171): the .codex/config.toml of each folder
+// from the repository's top down to the project, a nearer one over a
+// farther, used only when the project is trusted, which is the user
+// config's projects."<dir>".trust_level: the folder's own, else its
+// repository's, else the main checkout's for a linked worktree.
+func codexProjects(trust map[string]struct {
+	TrustLevel string `toml:"trust_level"`
+}) []codexProject {
+	var out []codexProject
+	for _, dir := range nativeProjects() {
+		pr := codexProject{dir: dir, plugins: map[string]*bool{}}
+		chain := []string{dir}
+		g, inGit := gitOf(dir)
+		if inGit {
+			for d := dir; d != g.Top; {
+				up := filepath.Dir(d)
+				if up == d {
+					break
+				}
+				d = up
+				chain = append(chain, d)
+			}
+		}
+		for i := len(chain) - 1; i >= 0; i-- {
+			raw, err := os.ReadFile(filepath.Join(chain[i], ".codex", "config.toml"))
+			if err != nil {
+				continue
+			}
+			var c codexConf
+			if toml.Unmarshal(raw, &c) != nil {
+				continue // one that doesn't parse says nothing
+			}
+			for id, v := range c.Plugins {
+				if v.Enabled != nil {
+					pr.plugins[id] = v.Enabled
+				}
+			}
+		}
+		keys := []string{dir}
+		if inGit {
+			keys = append(keys, g.Top)
+			if m := g.mainTop(); m != "" {
+				keys = append(keys, m)
+			}
+		}
+	look:
+		for _, k := range keys {
+			for _, kk := range pathSpellings(k) {
+				if lvl := codexTrust(trust, kk); lvl != "" {
+					pr.trusted = lvl == "trusted"
+					break look
+				}
+			}
+		}
+		out = append(out, pr)
+	}
+	return out
+}
+
+// codexFoldsKeys is whether Codex folds the case of a project's key: on
+// Windows only (cfg!(windows) in the config loader).
+var codexFoldsKeys = runtime.GOOS == "windows"
+
+// codexTrust is the trust_level the user config gives the folder key, as
+// Codex looks it up (codex-rs config loader 0.172,
+// project_trust_for_lookup_key): the key itself; on Windows, where Codex
+// lower-cases the key it looks up and writes (c:\users\…), the key
+// in lower case (ASCII), else the least of those that differ from it in
+// ASCII case only (#7786). "" when none does.
+func codexTrust(trust map[string]struct {
+	TrustLevel string `toml:"trust_level"`
+}, key string) string {
+	if !codexFoldsKeys {
+		return trust[key].TrustLevel
+	}
+	key = asciiLower(key)
+	if t := trust[key].TrustLevel; t != "" {
+		return t
+	}
+	best, lvl := "", ""
+	for k, t := range trust {
+		if t.TrustLevel != "" && asciiLower(k) == key && (lvl == "" || k < best) {
+			best, lvl = k, t.TrustLevel
+		}
+	}
+	return lvl
+}
+
+// asciiLower is s with A to Z in lower case, as Rust's to_ascii_lowercase.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// pathSpellings are dir as written and with its links read (/var and
+// /private/var on macOS), the ways a config may key it.
+func pathSpellings(dir string) []string {
+	out := []string{filepath.Clean(dir)}
+	if r, err := filepath.EvalSymlinks(dir); err == nil && r != out[0] {
+		out = append(out, r)
 	}
 	return out
 }

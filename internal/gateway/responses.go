@@ -713,6 +713,8 @@ func searchRoundsBack(msgs []Message, name string) []Message {
 
 func isSearch(p Part) bool { return p.Kind == Search }
 
+func isResult(p Part) bool { return p.Kind == ToolResult }
+
 // claudeSigned is thinking Claude signed, or its redacted_thinking.
 func claudeSigned(p Part) bool {
 	return p.Kind == Thinking && (p.SignedBy == sealAnthropic && p.Signature != "" || p.sealedBy(sealAnthropic))
@@ -1074,12 +1076,21 @@ func withoutSearchCalls(body []byte) []byte {
 }
 
 // mergeTurns joins consecutive messages of the same role, since the
-// Responses API splits an assistant turn into one item per part.
+// Responses API splits an assistant turn into one item per part. A user
+// message joined after tool results is marked where it begins (opens): the
+// message Codex sends next after a turn that ended on its tool results —
+// interrupted, or failed with no answer — is the user's next turn, as a
+// message after a Chat tool message or an Anthropic tool_result message
+// is, and turnIn tells it so.
 func mergeTurns(msgs []Message) []Message {
 	var out []Message
 	for _, m := range msgs {
 		if n := len(out); n > 0 && out[n-1].Role == m.Role && (m.Role == "user" || m.Role == "assistant") {
+			at := len(out[n-1].Parts)
 			out[n-1].Parts = append(out[n-1].Parts, m.Parts...)
+			if m.Role == "user" && len(m.Parts) > 0 && !slices.ContainsFunc(m.Parts, isResult) && slices.ContainsFunc(out[n-1].Parts[:at], isResult) {
+				out[n-1].Parts[at].opens = true
+			}
 			continue
 		}
 		out = append(out, m)
@@ -2043,7 +2054,10 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			if status == 0 {
 				status, said = fs, fsaid
 			}
-			emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: code, Status: status, Said: said})
+			if status == 0 {
+				status = namedEventStatus(data)
+			}
+			emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: code, Status: status, Said: said, Resets: saidResets(data, time.Now())})
 			return nil
 		}
 		// the reply ends: every call still waiting goes before its stop
@@ -2079,7 +2093,10 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		if status == 0 {
 			status, said = fs, fsaid
 		}
-		emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: code, Status: status, Said: said})
+		if status == 0 {
+			status = namedEventStatus(data)
+		}
+		emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: code, Status: status, Said: said, Resets: saidResets(data, time.Now())})
 	}
 	return nil
 }
@@ -2113,6 +2130,18 @@ func saidError(failed map[string]any, said json.RawMessage) {
 		if v := e.Get(k); v.Type == gjson.String && v.String() != "" {
 			failed[k] = v.String()
 		}
+	}
+}
+
+// resetsSaid puts on failed, an error event magpie writes, when the limit
+// that refused the request renews, as the upstream said it (Event.Resets,
+// in unix seconds, ChatGPT's resets_at): held before the reply began, the
+// event is what the rest is read from (resetsIn), and without it a Claude
+// Code turn on doubao-work's spent month rested a quarter of an hour
+// (aaron0x10 on X).
+func resetsSaid(failed map[string]any, t time.Time) {
+	if !t.IsZero() {
+		failed["resets_at"] = t.Unix()
 	}
 }
 
@@ -2483,6 +2512,7 @@ func (e *responsesEncoder) event(ev Event) {
 		}
 		failed := map[string]any{"code": code, "message": ev.Text}
 		saidError(failed, ev.Said)
+		resetsSaid(failed, ev.Resets)
 		e.send("response.failed", map[string]any{"response": e.response("failed", map[string]any{"error": failed})})
 	}
 	e.col.add(ev)

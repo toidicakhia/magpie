@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"slices"
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/gwtool"
+	"github.com/yetone/magpie/internal/mcpauth"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -53,6 +55,8 @@ func ownMCP() []OwnMCP {
 	out = append(out, OwnMCP{memoryServerName, "Magpie Memory", MemoryMCPPath})
 	// and so are the sessions: it reads what Settings › Sessions allows
 	out = append(out, OwnMCP{sessionsServerName, "Magpie Sessions", SessionsMCPPath})
+	// and the artifacts: pages kept on this computer
+	out = append(out, OwnMCP{artifactsServerName, "Magpie Artifacts", ArtifactsMCPPath})
 	if gwtool.Served(gwtool.PluginTools) {
 		// a note that can't be read says nothing: the server is listed,
 		// and its tools/list tells
@@ -67,7 +71,44 @@ func (s *Server) ownMCPList(w http.ResponseWriter, r *http.Request) {
 	// a gateway key held to some MCP servers is told of those alone
 	who := access.Caller(r.Context())
 	ss := slices.DeleteFunc(ownMCP(), func(o OwnMCP) bool { ok, _ := who.MCPServer(o.Name); return !ok })
-	writeJSON(w, 200, map[string]any{"servers": ss})
+	out := map[string]any{"servers": ss}
+	// told only to whom mcpProxy lends the sign-ins
+	if local(r) || sharedWith(r) {
+		out["signedIn"] = signedInMCP(who)
+	}
+	writeJSON(w, 200, out)
+}
+
+// SignedInMCP is a server magpie is signed in to, as OwnMCPPath lists it
+// for an app that reads the Library's servers from library.json itself
+// (the community chat page, plugins#873): it showed Signed in in the
+// Library and failed to connect from the chat, which sent the server no
+// sign-in. The app matches a Library entry by its name and its URL both
+// (a sign-in to another URL under the same name is not that entry's) and,
+// for a streamable HTTP entry, calls Path on this gateway, which carries
+// magpie's sign-in to the server (mcpProxy), as an agent is given it
+// (library's through). Nothing in it is a credential: the token stays in
+// magpie, which renews it.
+type SignedInMCP struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	Path string `json:"path"`
+}
+
+// signedInMCP are the servers magpie is signed in to that the caller's key
+// may use.
+func signedInMCP(who access.Identity) []SignedInMCP {
+	out := []SignedInMCP{}
+	for _, m := range mcpauth.Servers() {
+		if ok, _ := who.MCPServer(m.Name); !ok {
+			continue
+		}
+		if u, err := url.Parse(m.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+		out = append(out, SignedInMCP{Name: m.Name, URL: m.URL, Path: "/mcp/" + url.PathEscape(m.Name)})
+	}
+	return out
 }
 
 // OwnMCPTools are magpie's own MCP servers that are on now, Magpie
@@ -90,6 +131,8 @@ func OwnMCPTools(ctx context.Context) []OwnMCPServer {
 			s.Tools = []string{memorySearchTool, memorySaveTool, memoryForgetTool, memoryContextTool}
 		case sessionsServerName:
 			s.Tools = []string{sessionsSearchTool, sessionsReadTool}
+		case artifactsServerName:
+			s.Tools = []string{artifactPublishTool, artifactReadTool, artifactListTool, artifactOpenTool, artifactDeleteTool}
 		case "magpie-tools":
 			ts, _ := servedTools(ctx)
 			for _, t := range ts {

@@ -144,6 +144,7 @@ type Key struct {
 	// Models are the models the key may use (#882): "<provider>/<model>",
 	// "<provider>/*" or a group's "group/<name>"; none for every model,
 	// unless it lists accounts: then its accounts' providers' (HeldModels).
+	// NoModels alone is no model: a key for MCP servers only.
 	Models []string `json:"models,omitempty"`
 	// Aliases are the names the key gives models (tsingchao on X): a name
 	// its client asks by, the model "<provider>/<model>" it stands for.
@@ -217,6 +218,42 @@ type Key struct {
 	// are, for a device the user trusts. A request with no key (this
 	// computer's own) always follows the setting.
 	Redact string `json:"redact,omitempty"`
+	// Routing is how a routing group the key asks for picks among its
+	// members' accounts and keys for the key's requests (justforlxz on
+	// X): RoutingSmart, one of provider's group routings but Manual, or a
+	// plugin's
+	// "<plugin>/<name>"; "" follows the group's own. A manual group
+	// still sends to its pick, and a group in the group, or a provider
+	// routed its own way in it, keeps its own routing, as always.
+	Routing string `json:"routing,omitempty"`
+}
+
+// RoutingSmart is a key's Routing for Smart: a group's own routing ""
+// is Smart, and a key's "" follows the group.
+const RoutingSmart = "smart"
+
+// keyRoutings are the built-in routings a key can set, besides Smart.
+var keyRoutings = []string{provider.Ordered, provider.Drain, provider.PaceDrain, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.FreeFirst, provider.Fastest, provider.Cheapest, provider.FreeExpiring, provider.SmallFirst}
+
+// CleanRouting is a key's group routing as it is kept: "" to follow the
+// group, RoutingSmart, a built-in routing or a plugin's.
+func CleanRouting(v string) (string, error) {
+	r := strings.TrimSpace(v)
+	switch strings.ToLower(r) {
+	case "", "follow", "group", "default":
+		return "", nil
+	case RoutingSmart:
+		return RoutingSmart, nil
+	case provider.Manual: // a group's own pick: a key has none to send to
+	default:
+		if l := strings.ToLower(r); provider.GroupRouting(l) {
+			return l, nil
+		}
+		if provider.PluginRouting(r) {
+			return r, nil
+		}
+	}
+	return "", fmt.Errorf("Routing: follow, smart, one of %s or a plugin's <plugin>/<name>, not %q", strings.Join(keyRoutings, ", "), v)
 }
 
 // A key's Redact.
@@ -308,6 +345,9 @@ type Identity struct {
 	ServiceTier string
 	// Redact is Key.Redact; an issued key is held on by its issuer's on.
 	Redact string
+	// Routing is Key.Routing; an issued key that sets none follows its
+	// issuer's.
+	Routing string
 	// Default: the key is the sharing key magpie made itself (Default),
 	// the one it writes into this computer's own agents that reach the
 	// gateway from beyond loopback, never one the user made for someone
@@ -316,6 +356,15 @@ type Identity struct {
 	// Group is the routing group, by name, whose own accounts hold the
 	// request as well (HeldToGroup); "" when none does.
 	Group string
+	// Agent is the agent whose own account or key of some providers
+	// (provider.Provider.AgentAccounts, nb5p on Discord) holds the request
+	// as well (HeldToAgent); "" when none does.
+	Agent string
+	// agentOnly is set when every account the request is held to is the
+	// agent's (HeldToAgent on an identity held to none): it holds which
+	// account serves, never what a key held to some is kept from
+	// (KeyHeld).
+	agentOnly bool
 	// Spent are the key's limits of some models (Limit.Models) with
 	// nothing left, as the gateway found them for this request: their
 	// models are left out of its candidates, a routing group's members
@@ -493,7 +542,8 @@ type Change struct {
 	// resets every one. For "move-key" it is the place in the list the key
 	// goes to, counted from 0.
 	Index *int `json:"index,omitempty"`
-	// Models is what "models-key" sets; none lets the key use every model.
+	// Models is what "models-key" sets; none lets the key use every model,
+	// NoModels alone none.
 	Models []string `json:"models,omitempty"`
 	// Aliases is what "aliases-key" sets; none takes the names away.
 	Aliases map[string]string `json:"aliases,omitempty"`
@@ -526,6 +576,9 @@ type Change struct {
 	ServiceTier string `json:"serviceTier,omitempty"`
 	// Redact is what "redact-key" sets (Key.Redact): "", "on" or "off".
 	Redact string `json:"redact,omitempty"`
+	// Routing is what "routing-key" sets (Key.Routing), "" to follow the
+	// group's own.
+	Routing string `json:"routing,omitempty"`
 	// Secret is the value "add-key" gives the new key, one its clients
 	// already send (love1sbug on X: keys handed out from another gateway),
 	// or "rotate-key" gives the key; "" for one magpie makes.
@@ -708,6 +761,12 @@ func Update(action string, in Change) (string, error) {
 				return "", err
 			}
 			keys[i].ServiceTier = tier
+		case "routing-key":
+			routing, err := CleanRouting(in.Routing)
+			if err != nil {
+				return "", err
+			}
+			keys[i].Routing = routing
 		case "redact-key":
 			mode, err := CleanRedact(in.Redact)
 			if err != nil {
@@ -796,7 +855,7 @@ func Update(action string, in Change) (string, error) {
 		default:
 			return "", fmt.Errorf("unknown key action %q", action)
 		}
-		if defaultKey && action != "remove-key" && action != "rename-key" && action != "limit-key" && action != "reset-limit-key" && action != "models-key" && action != "aliases-key" && action != "accounts-key" && action != "mcp-key" && action != "quotas-key" && action != "concurrency-key" && action != "tier-key" && action != "redact-key" && action != "access-key" && action != "issuer-key" && action != "admin-key" && action != "memory-key" && action != "move-key" {
+		if defaultKey && action != "remove-key" && action != "rename-key" && action != "limit-key" && action != "reset-limit-key" && action != "models-key" && action != "aliases-key" && action != "accounts-key" && action != "mcp-key" && action != "quotas-key" && action != "concurrency-key" && action != "tier-key" && action != "routing-key" && action != "redact-key" && action != "access-key" && action != "issuer-key" && action != "admin-key" && action != "memory-key" && action != "move-key" {
 			mirror = &keys[i]
 		}
 	}

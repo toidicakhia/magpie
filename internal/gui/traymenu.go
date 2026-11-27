@@ -43,6 +43,9 @@ var trayZh = map[string]string{
 	"%s tokens (%s)":                      "%s token（%s）",
 	"Today: no requests yet":              "今天：还没有请求",
 	"Today: %s":                           "今天：%s",
+	// the tooltip's warning (trayEgressTip)
+	"Claude's way out to the internet is in %s, outside Anthropic's supported regions": "Claude 的网络出口在 %s，不在 Anthropic 支持的地区内",
+	"Claude's way out to the internet is %s, outside the ways out you allowed":         "Claude 的网络出口在 %s，不在你允许的出口内",
 }
 
 // trayZhTW is the tray menu in Traditional Chinese, with Taiwan's words.
@@ -79,6 +82,9 @@ var trayZhTW = map[string]string{
 	"%s tokens (%s)":                      "%s token（%s）",
 	"Today: no requests yet":              "今天：還沒有請求",
 	"Today: %s":                           "今天：%s",
+	// the tooltip's warning (trayEgressTip)
+	"Claude's way out to the internet is in %s, outside Anthropic's supported regions": "Claude 的網路出口在 %s，不在 Anthropic 支援的地區內",
+	"Claude's way out to the internet is %s, outside the ways out you allowed":         "Claude 的網路出口在 %s，不在你允許的出口內",
 }
 
 // trayJa is the tray menu in Japanese.
@@ -115,6 +121,9 @@ var trayJa = map[string]string{
 	"%s tokens (%s)":                      "%s トークン（%s）",
 	"Today: no requests yet":              "今日：まだリクエストはありません",
 	"Today: %s":                           "今日：%s",
+	// the tooltip's warning (trayEgressTip)
+	"Claude's way out to the internet is in %s, outside Anthropic's supported regions": "Claude のネットワーク出口が %s にあり、Anthropic のサポート対象地域外です",
+	"Claude's way out to the internet is %s, outside the ways out you allowed":         "Claude のネットワーク出口が %s にあり、許可した出口に含まれていません",
 }
 
 // trayDe is the tray menu in German.
@@ -151,6 +160,9 @@ var trayDe = map[string]string{
 	"%s tokens (%s)":                      "%s Token (%s)",
 	"Today: no requests yet":              "Heute: noch keine Anfragen",
 	"Today: %s":                           "Heute: %s",
+	// the tooltip's warning (trayEgressTip)
+	"Claude's way out to the internet is in %s, outside Anthropic's supported regions": "Claudes Weg ins Internet führt über %s, außerhalb der von Anthropic unterstützten Regionen",
+	"Claude's way out to the internet is %s, outside the ways out you allowed":         "Claudes Weg ins Internet führt über %s, keinen der von dir erlaubten Ausgänge",
 }
 
 // trayWords are the tray menu's and the tray icon's tooltip's

@@ -58,7 +58,10 @@ const compactFill = function (list, a) {
   list.classList.add("own-compact");
   const above = list.querySelector("#fullContextRow");
   above ? above.after(row) : list.append(row);
-  if (kind === "claude") row.after(...claudeCacheRows(list), claudeAttributionRow(list));
+  if (kind === "claude") {
+    const options = claudeOptions(list, a);
+    row.after(...claudeCacheRows(options), claudeAttributionRow(options));
+  }
   // every agent's values, and Codex's hints, change when that row is drawn
   const seen = new MutationObserver(() => row.isConnected ? draw() : seen.disconnect());
   // Details can build this list before attaching it to the page.
@@ -66,12 +69,43 @@ const compactFill = function (list, a) {
   if (segsBox) seen.observe(segsBox, { childList: true });
 };
 
+function claudeOptions(list, a) {
+  const remote = a.id.startsWith("claude@wsl:");
+  const draws = [];
+  let current = null;
+  const refresh = (next) => {
+    current = next;
+    draws.forEach((draw) => draw());
+  };
+  const report = (err) => { if (list.isConnected) settingsErr(err); };
+  if (remote) api("settings/claude-options/" + encodeURIComponent(a.id)).then(refresh, report);
+  return {
+    get: () => remote ? current : prefs || {},
+    watch: (row, draw) => {
+      if (remote) draws.push(() => { if (row.isConnected) draw(); });
+      else {
+        const seen = new MutationObserver(() => row.isConnected ? draw() : seen.disconnect());
+        const box = list.querySelector("#fullContextSegs");
+        if (box) seen.observe(box, { childList: true });
+      }
+    },
+    set: (path, body, draw) => {
+      if (remote) api(path, { agent: a.id, ...body }).then(refresh, report);
+      else writingPrefs(api(path, body)).then((ns) => {
+        prefs = ns;
+        renderSettings();
+        draw();
+      }).catch(settingsErr);
+    },
+  };
+}
+
 // Claude Code's prompt cache, beside its compaction (Linka on Discord: the
 // Usage card offers no way to change one that is already the cheapest):
 // the main conversation's and the subagents', each 5 min, 1 hour or
 // Claude Code's own default, which takes the key out of its settings.json
 // (agent.ClaudeCacheSet). One a variable sets shows it, unchangeable here.
-function claudeCacheRows(list) {
+function claudeCacheRows(options) {
   const KNOBS = [["cache_ttl", "Prompt cache · main conversation"], ["subagent_cache_ttl", "Prompt cache · subagents"]];
   const OPTS = [["", "Claude Code's default"], ["5m", "5 min"], ["1h", "1 hour"]];
   return KNOBS.map(([knob, label]) => {
@@ -82,8 +116,9 @@ function claudeCacheRows(list) {
     row.append(who, val);
     let drawn;
     const draw = () => {
-      const c = ((prefs || {}).claudeCache || []).find((x) => x.knob === knob) || {};
-      const key = JSON.stringify(c);
+      const own = options.get();
+      const c = (own?.claudeCache || []).find((x) => x.knob === knob) || {};
+      const key = JSON.stringify([!!own, c]);
       if (key === drawn) return;
       drawn = key;
       const cur = c.value || "", known = OPTS.find(([v]) => v === cur);
@@ -92,15 +127,14 @@ function claudeCacheRows(list) {
       b.setAttribute("aria-label", t(label));
       b.setAttribute("aria-haspopup", "menu");
       b.setAttribute("aria-expanded", "false");
-      b.append(el("span", "", known ? t(known[1]) : cur), svg(CHEV, 11, 1.6));
-      b.disabled = !!c.locked;
+      b.append(el("span", "", own ? (known ? t(known[1]) : cur) : "—"), svg(CHEV, 11, 1.6));
+      b.disabled = !own || !!c.locked;
       b.onclick = (e) => {
         e.stopPropagation();
         if (b.classList.contains("open")) return closeProtoMenu();
         openProtoMenu(b, OPTS.map(([v, name]) => ({ v, name, note: "" })), cur, (v) => {
           if (v === cur) return;
-          writingPrefs(api("settings/claude-cache", { knob, value: v }))
-            .then((ns) => { prefs = ns; renderSettings(); if (row.isConnected) draw(); }).catch(settingsErr);
+          options.set("settings/claude-cache", { knob, value: v }, () => { if (row.isConnected) draw(); });
         }, label, "sess-menu", "right");
       };
       val.replaceChildren(b);
@@ -108,10 +142,7 @@ function claudeCacheRows(list) {
       if (c.locked) who.append(el("div", "sub", t("{name} is set and comes first", { name: c.locked })));
     };
     draw();
-    // drawn again when the settings are read again
-    const seen = new MutationObserver(() => row.isConnected ? draw() : seen.disconnect());
-    const box = list.querySelector("#fullContextSegs");
-    if (box) seen.observe(box, { childList: true });
+    options.watch(row, draw);
     return row;
   });
 }
@@ -120,7 +151,7 @@ function claudeCacheRows(list) {
 // X): On is Claude Code's own default, Off writes attribution.commit = "" in
 // its settings.json (agent.ClaudeAttributionSet). The user's own trailer
 // text is shown as it is and not changed here.
-function claudeAttributionRow(list) {
+function claudeAttributionRow(options) {
   const label = "Commit signature (Co-Authored-By)";
   const row = el("div", "row pref claude-attribution");
   const who = el("div", "who"), val = el("div", "val");
@@ -128,7 +159,8 @@ function claudeAttributionRow(list) {
   row.append(who, val);
   let drawn;
   const draw = () => {
-    const cur = (prefs || {}).claudeAttribution || "on";
+    const own = options.get();
+    const cur = own ? own.claudeAttribution || "on" : "";
     if (cur === drawn) return;
     drawn = cur;
     const b = el("button", "sess-pick");
@@ -136,22 +168,76 @@ function claudeAttributionRow(list) {
     b.setAttribute("aria-label", t(label));
     b.setAttribute("aria-haspopup", "menu");
     b.setAttribute("aria-expanded", "false");
-    b.append(el("span", "", t(cur === "off" ? "Off" : cur === "custom" ? "Your own text" : "On")), svg(CHEV, 11, 1.6));
-    b.disabled = cur === "custom";
+    b.append(el("span", "", cur ? t(cur === "off" ? "Off" : cur === "custom" ? "Your own text" : "On") : "—"), svg(CHEV, 11, 1.6));
+    b.disabled = !cur || cur === "custom";
     b.onclick = (e) => {
       e.stopPropagation();
       if (b.classList.contains("open")) return closeProtoMenu();
       openProtoMenu(b, [["on", "On"], ["off", "Off"]].map(([v, name]) => ({ v, name, note: "" })), cur, (v) => {
         if (v === cur) return;
-        writingPrefs(api("settings/claude-attribution", { on: v === "on" }))
-          .then((ns) => { prefs = ns; renderSettings(); if (row.isConnected) draw(); }).catch(settingsErr);
+        options.set("settings/claude-attribution", { on: v === "on" }, () => { if (row.isConnected) draw(); });
       }, label, "sess-menu", "right");
     };
     val.replaceChildren(b);
   };
   draw();
-  const seen = new MutationObserver(() => row.isConnected ? draw() : seen.disconnect());
-  const box = list.querySelector("#fullContextSegs");
+  options.watch(row, draw);
+  return row;
+}
+
+// Where in its window the agent compacts, a percent (moooyo on Discord:
+// compact once 65% of the context is used), for the agents with a knob of
+// their own for it (settings.CompactPctAgents). The window is the one Long
+// conversations gives the agent; Default leaves the agent's own. Seldom
+// changed, so it sits under Advanced.
+const PCT_AGENTS = ["codex", "claude", "grok", "qwen"];
+const PCTS = [50, 60, 65, 70, 75, 80, 85, 90];
+function compactPctRow(a) {
+  const kind = kindOf(a);
+  if (!PCT_AGENTS.includes(kind)) return null;
+  const label = "Compact at";
+  const row = el("div", "row pref compact-pct");
+  row.dataset.agent = kind;
+  const who = el("div", "who"), val = el("div", "val");
+  who.append(el("div", "name", t(label)));
+  row.append(who, val);
+  const name = (p) => p ? t("{n}% of the window", { n: p }) : t("Default");
+  let drawn;
+  const draw = () => {
+    const cur = prefs ? (prefs.agentCompactPcts || {})[kind] || 0 : -1;
+    if (cur === drawn) return;
+    drawn = cur;
+    const b = el("button", "sess-pick");
+    b.type = "button";
+    b.setAttribute("aria-label", t(label));
+    b.setAttribute("aria-haspopup", "menu");
+    b.setAttribute("aria-expanded", "false");
+    b.append(el("span", "", cur < 0 ? "—" : name(cur)), svg(CHEV, 11, 1.6));
+    b.disabled = cur < 0;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      if (b.classList.contains("open")) return closeProtoMenu();
+      const ps = cur && !PCTS.includes(cur) ? [...PCTS, cur].sort((x, y) => x - y) : PCTS;
+      openProtoMenu(b, [0, ...ps].map((p) => ({ v: String(p), name: name(p), note: "" })), String(cur), (v) => {
+        if (Number(v) === cur) return;
+        writingPrefs(api("settings/agent-compact-pct", { agent: kind, pct: Number(v) })).then((ns) => {
+          prefs = ns;
+          renderSettings();
+          if (row.isConnected) draw();
+        }).catch(settingsErr);
+      }, label, "sess-menu", "right");
+    };
+    val.replaceChildren(b);
+  };
+  draw();
+  // drawn again with the settings, each time they are (renderAgentPrefs)
+  const box = document.getElementById("fullContextSegs");
+  let placed = false;
+  const seen = new MutationObserver(() => {
+    if (!row.isConnected && placed) return seen.disconnect();
+    placed ||= row.isConnected;
+    draw();
+  });
   if (box) seen.observe(box, { childList: true });
   return row;
 }
@@ -159,16 +245,21 @@ function claudeAttributionRow(list) {
 // The user's own settings of the agent's (agent.Field.Own: Claude Code's
 // permission mode, EricChenChannel on X), seldom changed, so folded under
 // Advanced after the sheet's list; written in the agent's own config, never
-// taken back when magpie lets go of the agent.
+// taken back when magpie lets go of the agent. The compaction percent
+// (compactPctRow) comes first in the same fold.
 function ownFieldsFold(list, a) {
   const own = a.own || [];
-  if (!own.length) return;
-  queueMicrotask(() => {
+  const pct = compactPctRow(a);
+  if (!own.length && !pct) return;
+  // built at once where the list is placed already (Details measures its
+  // height right after), else once the sheet has placed it
+  const build = () => {
     if (!list.parentNode) return;
     list.parentNode.querySelector(":scope > .own-fields")?.remove();
     const fold = el("details", "prefs-more own-fields");
     const inner = el("div", "list prefs");
     fold.append(el("summary", "", t("Advanced")), inner);
+    if (pct) inner.append(pct);
     for (const f of own) {
       const label = f.label[0].toUpperCase() + f.label.slice(1);
       const row = el("div", "row pref own-field");
@@ -203,7 +294,9 @@ function ownFieldsFold(list, a) {
       inner.append(row);
     }
     list.after(fold);
-  });
+  };
+  if (list.parentNode) build();
+  else queueMicrotask(build);
 }
 
 // Its own context windows come in the same sheet, last (agentwindow.js).

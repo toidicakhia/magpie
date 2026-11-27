@@ -263,6 +263,22 @@ func TestGatewayKeyModelsCLI(t *testing.T) {
 			t.Error("accepted", args)
 		}
 	}
+	// none: a key for MCP servers only (ifitscolorful on X); "-" itself,
+	// or beside a model, is no model's name
+	if got, err := call("models", id, "none"); err != nil || got != "Phone: no model, MCP servers only\n" {
+		t.Fatal(got, err)
+	}
+	if keys, _ = access.List(); !slices.Equal(keys[0].Models, []string{access.NoModels}) {
+		t.Fatal("none kept", keys[0].Models)
+	}
+	if got, _ := call("list"); !strings.Contains(got, "none") {
+		t.Fatal(got)
+	}
+	for _, args := range [][]string{{"models", id, "-"}, {"models", id, "-", "openai/gpt-5"}, {"models", id, "--help"}} {
+		if _, err := call(args...); err == nil {
+			t.Error("accepted", args)
+		}
+	}
 	if got, err := call("models", id, "all"); err != nil || got != "Phone: every model\n" {
 		t.Fatal(got, err)
 	}
@@ -815,5 +831,44 @@ func TestGatewayKeyRedactCLI(t *testing.T) {
 	}
 	if keys, _ = access.List(); keys[0].Redact != "off" {
 		t.Fatalf("a refused call changed it: %q", keys[0].Redact)
+	}
+}
+
+// justforlxz on X: `gateway-key routing <id> [follow|smart|order|…]` shows
+// or sets how the routing groups a key asks for route its requests.
+func TestGatewayKeyRoutingCLI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := settings.Save(settings.Settings{LAN: true}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		err := gatewayKeysTo(&out, append([]string{"gateway-key"}, args...))
+		return out.String(), err
+	}
+	if _, err := call("add", "Team"); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := access.List()
+	id := keys[0].ID
+	for _, c := range [][2]string{{"", "follows each routing group's own"}, {"rotate", "rotate"}, {"smart", "smart"}, {"usage", "usage"}, {"follow", "follows each routing group's own"}} {
+		args := []string{"routing", id}
+		if c[0] != "" {
+			args = append(args, c[0])
+		}
+		if got, err := call(args...); err != nil || got != "Team: group routing "+c[1]+"\n" {
+			t.Fatalf("%v: %q %v", args, got, err)
+		}
+	}
+	call("routing", id, "rotate")
+	for _, args := range [][]string{{"routing"}, {"routing", id, "manual"}, {"routing", id, "--help"}, {"routing", id, "rotate", "x"}, {"routing", "missing", "rotate"}, {"routing", "missing"}} {
+		if _, err := call(args...); err == nil {
+			t.Error("accepted", args)
+		}
+	}
+	if keys, _ = access.List(); keys[0].Routing != "rotate" {
+		t.Fatalf("a refused call changed it: %q", keys[0].Routing)
 	}
 }

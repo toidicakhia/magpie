@@ -126,10 +126,46 @@ func EachGatewaySession(nativeKeys map[string]bool, each func(GatewaySession) bo
 	}
 }
 
+// External is g as a session list holds it (sessions.MergeExternal),
+// without its usage by day: a list and a detail never read those.
+func (s GatewaySession) External() sessions.ExternalSession {
+	e := sessions.ExternalSession{Agent: s.Agent, ID: s.ID, Start: s.Start, Last: s.Last, Tokens: s.Tokens, Cost: s.Cost, Unpriced: s.Unpriced}
+	e.Models = make([]sessions.ExternalModel, 0, len(s.Models))
+	for _, m := range s.Models {
+		e.Models = append(e.Models, sessions.ExternalModel{Model: m.Model, Tokens: m.Tokens, Cost: m.Cost, Priced: m.Priced})
+	}
+	return e
+}
+
+// ListedGateway are the gateway's sessions a list of n rows shows beside
+// the natives whose keys are nativeKeys (sessions.GatewayKeys): newest
+// first, titled by what each was first asked (sessions.GatewayTitler),
+// without those deleted from the list (sessions.GatewayHidden) or that
+// spent nothing (SpentNothing), and no more than n. The Sessions page and
+// memory's reading of conversations both list them so.
+func ListedGateway(nativeKeys map[string]bool, n int) []sessions.ExternalSession {
+	hidden := sessions.GatewayHidden()
+	title := sessions.GatewayTitler()
+	var ext []sessions.ExternalSession
+	EachGatewaySession(nativeKeys, func(g GatewaySession) bool {
+		if len(ext) == n {
+			return false
+		}
+		if g.Agent != "" && g.ID != "" && !hidden(g.Agent, g.ID, g.Last) && !g.SpentNothing() {
+			e := g.External()
+			e.Title = title(g.Agent, g.ID)
+			ext = append(ext, e)
+		}
+		return true
+	})
+	return ext
+}
+
 // localMidnight is since's local date when since is that date's start.
 func localMidnight(since time.Time) (string, bool) {
-	date := since.In(time.Local).Format(time.DateOnly)
-	start, err := time.ParseInLocation(time.DateOnly, date, time.Local)
+	loc := sessions.Local()
+	date := since.In(loc).Format(time.DateOnly)
+	start, err := time.ParseInLocation(time.DateOnly, date, loc)
 	return date, err == nil && start.Equal(since)
 }
 
@@ -236,13 +272,15 @@ func gatewayProjection() gatewayProjectionEntry {
 	meta := usagePriceCacheKey(time.Now())
 	// read before the lock: it reads settings.json
 	alias := provider.UsageAlias()
+	// the zone the sessions' days are dates in: Settings' time zone moves it
+	zone := sessions.Local()
 	gatewayCache.Lock()
 	defer gatewayCache.Unlock()
-	if e := gatewayCache.entry; e != nil && e.version == snapshot.version && e.meta == meta && e.zone == time.Local {
+	if e := gatewayCache.entry; e != nil && e.version == snapshot.version && e.meta == meta && e.zone == zone {
 		return *e
 	}
-	ss, prefix := foldGateway(snapshot, meta, alias, gatewayCache.prefix)
-	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, zone: time.Local, sessions: ss, byID: make(map[string]int, len(ss))}
+	ss, prefix := foldGateway(snapshot, meta, zone, alias, gatewayCache.prefix)
+	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, zone: zone, sessions: ss, byID: make(map[string]int, len(ss))}
 	for i, s := range ss {
 		e.byID[s.Agent+"|"+s.ID] = i
 	}
@@ -270,12 +308,12 @@ var gatewayFolds int
 // foldGateway is the projection of every call in snapshot, sorted, and
 // the prefix to count the next one on from. Rows are counted in the log's
 // order either way, so its numbers are buildGatewaySessions' to the bit.
-func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, pre *gatewayPrefix) ([]GatewaySession, *gatewayPrefix) {
+func foldGateway(snapshot *logSnapshot, meta string, zone *time.Location, alias func(string) string, pre *gatewayPrefix) ([]GatewaySession, *gatewayPrefix) {
 	gatewayBuilds.Add(1)
 	blocks := snapshot.blocks
 	cut := max(len(blocks)-1, 0)
-	if pre == nil || pre.meta != meta || pre.zone != time.Local || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
-		pre = &gatewayPrefix{meta: meta, zone: time.Local, built: map[gatewayKey]GatewaySession{}}
+	if pre == nil || pre.meta != meta || pre.zone != zone || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
+		pre = &gatewayPrefix{meta: meta, zone: zone, built: map[gatewayKey]GatewaySession{}}
 	} else if pre.n > 0 {
 		gatewayFolds++
 	}
@@ -300,7 +338,7 @@ func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, 
 	if pre.n < cut {
 		own := map[gatewayKey]*gatewayAcc{}
 		countGateway(blocks[pre.n:cut], time.Time{}, nil, alias, priceOf, pre.built, own, nil, keep)
-		next = &gatewayPrefix{n: cut, last: blocks[cut-1], meta: meta, zone: time.Local, built: listed(pre.built, own)}
+		next = &gatewayPrefix{n: cut, last: blocks[cut-1], meta: meta, zone: zone, built: listed(pre.built, own)}
 	}
 	tail := map[gatewayKey]*gatewayAcc{}
 	countGateway(blocks[cut:], time.Time{}, nil, alias, priceOf, next.built, tail, nil, keep)
@@ -454,8 +492,9 @@ func sortGatewaySessions(out []GatewaySession) {
 // from its session in base (never written), and into daily when it is
 // not nil.
 func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]bool, alias func(string) string, priceOf func(Record) *catalog.Price, base map[gatewayKey]GatewaySession, own map[gatewayKey]*gatewayAcc, daily map[gatewayDayKey]*GatewayDayUsage, keep keptStrings) {
+	loc := sessions.Local()
 	visitBlocks(blocks, since, func(r Record) {
-		if r.IsRejected() || r.IsReported() || r.Session == "" {
+		if r.IsRejected() || r.IsReported() || r.Session == "" || r.TriedOnly() {
 			return
 		}
 		a := keep.of(ReportedAs(r.Agent))
@@ -495,7 +534,7 @@ func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]boo
 		if alias != nil {
 			model = keep.of(alias(model))
 		}
-		dk := gatewayDayKey{r.Time.In(time.Local).Format(time.DateOnly), a, model}
+		dk := gatewayDayKey{r.Time.In(loc).Format(time.DateOnly), a, model}
 		for _, kept := range []map[gatewayDayKey]*GatewayDayUsage{daily, acc.days} {
 			if kept == nil {
 				continue

@@ -234,7 +234,7 @@ function renderGatewayKeys() {
     tick.onclick = () => gatewayKeyAction(k.off ? "on-key" : "off-key", { key: k.id });
     // the copy sits by the key it copies (the owner: stranded among the
     // badges it read as nobody's); Rotate and Remove wait in the row's menu
-    row.append(tick, gatewayRename(k), el("span", "plan mono", k.masked), copyCallerKeyBtn(k), el("span", "grow"), ...(k.browser ? [gatewayBrowserTag()] : k.readOnly ? [gatewayReadOnlyTag()] : k.admin && gatewayKeyCanAdmin(k) ? [gatewayAdminTag(k)] : []), ...(k.memory && gatewayKeyCanAdmin(k) ? [gatewayMemoryTag()] : []), gatewayModelsBadge(k), ...gatewayKeptOutBadge(k), ...gatewayMCPBadge(k), gatewayQuotasBadge(k), ...(k.browser || k.readOnly ? [] : [gatewayConcurrencyBadge(k), gatewayTierBadge(k), gatewayRedactBadge(k)]), gatewayLimitBadge(k), gatewayKeyMore(k));
+    row.append(tick, gatewayRename(k), el("span", "plan mono", k.masked), copyCallerKeyBtn(k), el("span", "grow"), ...(k.browser ? [gatewayBrowserTag()] : k.readOnly ? [gatewayReadOnlyTag()] : k.admin && gatewayKeyCanAdmin(k) ? [gatewayAdminTag(k)] : []), ...(k.memory && gatewayKeyCanAdmin(k) ? [gatewayMemoryTag()] : []), gatewayModelsBadge(k), ...gatewayKeptOutBadge(k), ...gatewayMCPBadge(k), gatewayQuotasBadge(k), ...(k.browser || k.readOnly ? [] : [gatewayConcurrencyBadge(k), gatewayTierBadge(k), gatewayRoutingBadge(k), gatewayRedactBadge(k)]), gatewayLimitBadge(k), gatewayKeyMore(k));
     const under = gatewayLimit?.id === k.id ? [gatewayLimitEditor(k)] : keyUsed(k).map((u) => gatewayLimitLine(k, u));
     if (under.length) row.classList.add("with-limit"), row.append(...under);
     list.append(row);
@@ -698,13 +698,16 @@ function gatewayModelsBadge(k) {
   const as = (k.accounts || []).filter((a) => !isKeptOut(a));
   const b = el("button", "amodels key-models" + (ms.length || as.length ? " set" : ""));
   b.type = "button";
-  b.textContent = !ms.length && !as.length ? t("All models")
+  // a key held to no model (access.NoModels, "-") is for MCP servers
+  // only (ifitscolorful on X)
+  const none = ms[0] === "-";
+  b.textContent = none ? t("No model") : !ms.length && !as.length ? t("All models")
     : ms.length ? (ms.length === 1 && !as.length ? ms[0] : t("{n} models", { n: ms.length }))
       : (as.length === 1 ? accountShown(as[0]) : t("{n} accounts", { n: as.length }));
   // an account picked and no model holds the key to the accounts'
   // providers' models (access.HeldModels, Linka on Discord): it is not
   // let off to every other provider's
-  b.title = (ms.length ? t("Only these models: {list}", { list: ms.join(", ") }) : t("Pick the models this key may use"))
+  b.title = none ? t("This key may use no model, only MCP servers") : (ms.length ? t("Only these models: {list}", { list: ms.join(", ") }) : t("Pick the models this key may use"))
     + (as.length ? "\n" + t("Only these accounts: {list}", { list: as.map(accountShown).join(", ") })
       + "\n" + (ms.length ? t("A provider with no account picked is used on every account; to keep the key off it, pick only other providers' models")
         : t("No model is picked, so this key may use only the picked accounts' providers' models")) : "");
@@ -713,7 +716,7 @@ function gatewayModelsBadge(k) {
   b.setAttribute("aria-expanded", "false");
   const open = (models, accounts, groups, bare) => {
     if (!b.isConnected) return;
-    const opts = [{ v: "", name: "All models", note: "Any model and any account, now and later" }];
+    const opts = [{ v: "", name: "All models", note: "Any model and any account, now and later" }, { v: "-", name: "No model", note: "MCP servers only" }];
     const seen = new Set();
     // the accounts and keys the key may be held to (#905), each right
     // after its provider's models, not one block at the end: an account
@@ -801,11 +804,14 @@ function gatewayModelsBadge(k) {
       // The accounts are sent only when they changed: a model picked says
       // nothing of the key's accounts.
       (async () => {
-        const pickedModels = picked.filter((v) => !accountsSet.has(v));
+        let pickedModels = picked.filter((v) => !accountsSet.has(v));
         const pickedAccounts = picked.filter((v) => accountsSet.has(v));
+        // "No model" just ticked is none; left ticked beside a model
+        // ticked since, the model (as gatewayMCPPick's "No MCP server")
+        if (pickedModels.includes("-")) pickedModels = !none ? ["-"] : pickedModels.length > 1 ? pickedModels.filter((v) => v !== "-") : pickedModels;
         const out = await gatewayKeyAction("models-key", { key: k.id, models: pickedModels });
         if (out) {
-          status(t(pickedModels.length ? "{name} may use only the models picked"
+          status(t(pickedModels[0] === "-" ? "{name} may use no model, only MCP servers" : pickedModels.length ? "{name} may use only the models picked"
             : pickedAccounts.length ? "{name} may use only the picked accounts' models" : "{name} may use every model", { name: k.name }), "ok");
         }
         if (pickedAccounts.length !== as.length || pickedAccounts.some((v) => !as.includes(v))) {
@@ -1056,6 +1062,42 @@ function gatewayTierBadge(k) {
       const out = await gatewayKeyAction("tier-key", { key: k.id, serviceTier: v });
       if (out) status(t("{who}: service tier {tier}", { who: k.name, tier: t(KEY_TIERS.find((o) => o.v === v).name) }), "ok");
     }, "Service tier", "sess-menu");
+  };
+  return b;
+}
+
+// how a routing group the key asks for routes its requests (justforlxz on
+// X): as the group does, or by a routing of the key's own; a Manual group
+// still sends to its pick. The built-in rotation's routings leave the menu
+// while it is off (ROTATION), one the key has kept.
+const KEY_ROUTINGS = [
+  ["", "As the group routes"], ["smart", "Quota first"], ["order", "In order"], ["drain", "Until used up"], ["pace-drain", "Before expiry, one by one"],
+  ["rotate", "In turn"], ["usage", "Least used first"], ["pace", "Use before expiry"], ["weight", "By weight"],
+  ["free", "Free first"], ["fast", "Speed first"], ["cheap", "Cheapest first"], ["expiring", "Free quota by expiry"],
+  ["fit", "Small context first"],
+];
+function gatewayRoutingBadge(k) {
+  const own = k.routing || "";
+  const opts = KEY_ROUTINGS.filter(([v]) => v === own || !(ROTATION.has(v) && featuresOff.has("rotation")))
+    .map(([v, name]) => ({ v, name }))
+    .concat(jsRoutings(own).filter(([v]) => !KEY_ROUTINGS.some(([id]) => id === v)).map(([v, name]) => ({ v, name, literalName: true })));
+  const cur = opts.find((o) => o.v === own) || opts[0];
+  const word = (o) => o.literalName ? o.name : t(o.name);
+  const b = el("button", "amodels key-routing" + (own ? " set" : ""));
+  b.type = "button";
+  b.textContent = own ? word(cur) : t("Group routing");
+  b.title = t(own ? "Routing groups this key asks for route its requests this way, not by their own" : "Routing groups route this key's requests by their own routing");
+  b.setAttribute("aria-label", t("Group routing"));
+  b.setAttribute("aria-haspopup", "menu");
+  b.setAttribute("aria-expanded", "false");
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (b.classList.contains("open")) return closeProtoMenu();
+    openProtoMenu(b, opts, cur.v, async (v) => {
+      if (v === cur.v) return;
+      const out = await gatewayKeyAction("routing-key", { key: k.id, routing: v });
+      if (out) status(t("{who}: group routing {routing}", { who: k.name, routing: word(opts.find((o) => o.v === v)) }), "ok");
+    }, "Group routing", "sess-menu");
   };
   return b;
 }

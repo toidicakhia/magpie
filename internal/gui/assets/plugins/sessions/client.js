@@ -36,7 +36,16 @@ magpie.plugin("sessions", (ctx) => {
   let elseCtl = null;
   let elseT = 0;
   const ELSE_MORE = 20;
-  const SEARCH_WAIT = 300;
+  // what was said is read a moment after the filter's words count: they
+  // count once typing pauses (TYPE_WAIT), at Enter, and never while an
+  // input method is still composing them (suetfungsit on X: each keystroke
+  // filtered and redrew a long history's list, and a Chinese input method's
+  // pinyin was searched before its characters were picked); typed is the
+  // words in the field that don't count yet
+  const SEARCH_WAIT = 100;
+  const TYPE_WAIT = 200;
+  let typed = null;
+  let typeT = 0;
   const needleOf = (q) => q.trim().split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   let trashOn = false;
   // Picking sessions to delete is a mode of its own, as in Finder and Mail:
@@ -59,6 +68,8 @@ magpie.plugin("sessions", (ctx) => {
   let detail = "";            // the session opened to its details
   const talkOpen = new Set(); // conversations whose sheet was opened, by agent/id
   const talks = new Map();    // what was said in them, as read, by agent/id
+  const stepsOpen = new Map(); // the turns whose steps were unfolded, by conversation
+  const stepFull = new WeakSet(); // the steps shown whole
   // A session's subagents sit under it, folded (#2261): the conversations
   // its agent started inside it (Claude Code, Qoder, OpenCode, Kimi Code:
   // s.subagents, each opened to what was said in it), and the Codex
@@ -223,6 +234,8 @@ magpie.plugin("sessions", (ctx) => {
     }
     trashOn = false;
     if (s.id) {
+      clearTimeout(typeT);
+      typed = null;
       query = "";
       searchSoon();
       detail = s.id;
@@ -256,9 +269,21 @@ magpie.plugin("sessions", (ctx) => {
     return q ? list.filter((s) => hitOf(s) || [s.title, s.cwd, s.id, ...(s.models || []).map((m) => m.model)].some((x) => (x || "").toLowerCase().includes(q))) : list;
   };
 
-  // searchSoon searches what was said for the filter's words, once typing
-  // pauses; fewer than two letters search nothing
-  function searchSoon() {
+  // filterBy makes v the filter's words; now (Enter, Escape) searches what
+  // was said at once
+  function filterBy(v, now) {
+    clearTimeout(typeT);
+    typed = null;
+    if (v === query && !now) return;
+    query = v;
+    drawnIn.clear();
+    searchSoon(now);
+    redrawList();
+  }
+
+  // searchSoon searches what was said for the filter's words, a moment on
+  // or now; fewer than two letters search nothing
+  function searchSoon(now) {
     clearTimeout(searchT);
     const needle = needleOf(query);
     if (!data?.agent || [...needle].length < 2) {
@@ -268,7 +293,7 @@ magpie.plugin("sessions", (ctx) => {
       elseSoon("");
       return;
     }
-    elseSoon(needle);
+    elseSoon(needle, 0, now);
     if (found && found.agent === data.agent && found.needle === needle && !found.busy && !found.error) return;
     searchCtl?.abort();
     searchCtl = null;
@@ -285,13 +310,13 @@ magpie.plugin("sessions", (ctx) => {
       }
       if (searchCtl === ctl) searchCtl = null;
       if (view === "sessions" && !trashOn) { drawnIn.clear(); redrawList(); }
-    }, SEARCH_WAIT);
+    }, now ? 0 : SEARCH_WAIT);
   }
 
   // elseSoon searches every agent's sessions for needle (none in gateway
   // mode, where no agent's files here are read), once typing pauses, and
   // again a few seconds on while magpie's index has sessions to read yet
-  function elseSoon(needle, again = 0) {
+  function elseSoon(needle, again = 0, now) {
     clearTimeout(elseT);
     if (!needle || data?.reads?.gateway) {
       elseCtl?.abort();
@@ -319,7 +344,7 @@ magpie.plugin("sessions", (ctx) => {
       }
       if (elseCtl === ctl) elseCtl = null;
       if (view === "sessions" && !trashOn) redrawList();
-    }, again ? 0 : SEARCH_WAIT);
+    }, again || now ? 0 : SEARCH_WAIT);
   }
   // the hits elsewhere shown with the agent shown: those of other agents
   const elseHits = () => elsewhere && elsewhere.needle === needleOf(query) && data ? elsewhere.hits.filter((h) => h.agent !== data.agent).slice(0, ELSE_MORE) : [];
@@ -669,10 +694,18 @@ magpie.plugin("sessions", (ctx) => {
     q.spellcheck = false;
     q.autocomplete = "off";
     q.placeholder = t("Search sessions");
-    q.value = query;
+    q.value = typed ?? query;
     q.hidden = trashOn;
-    q.oninput = () => { query = q.value; drawnIn.clear(); searchSoon(); redrawList(); };
-    q.onkeydown = (e) => { if (e.key === "Escape" && q.value) { e.stopPropagation(); q.value = ""; query = ""; drawnIn.clear(); searchSoon(); redrawList(); } };
+    let composing = false;
+    const later = () => { typed = q.value; clearTimeout(typeT); typeT = setTimeout(() => filterBy(q.value), TYPE_WAIT); };
+    q.oninput = (e) => { if (e.isComposing || composing) { typed = q.value; clearTimeout(typeT); } else later(); };
+    q.addEventListener("compositionstart", () => { composing = true; clearTimeout(typeT); });
+    q.addEventListener("compositionend", () => { composing = false; later(); });
+    q.onkeydown = (e) => {
+      if (e.isComposing || e.keyCode === 229) return; // the input method's own Enter or Escape
+      if (e.key === "Enter") filterBy(q.value, true);
+      else if (e.key === "Escape" && q.value) { e.stopPropagation(); q.value = ""; filterBy("", true); }
+    };
     const sel = el("button", "text sm-select" + (selecting ? " on" : ""), t(selecting ? "Done" : "Select"));
     sel.type = "button";
     sel.setAttribute("aria-pressed", String(selecting));
@@ -1484,19 +1517,23 @@ magpie.plugin("sessions", (ctx) => {
     return d;
   }
 
-  // exportBtn saves a session's whole conversation as Markdown (#1276),
-  // read from the agent's own file by the server: in magpie web the browser
+  // exportBtn saves a session's conversation as Markdown (#1276), read
+  // from the agent's own file by the server: the whole of it, or only what
+  // the user and the agent said, no thinking or tools (usrname1833 on
+  // Discord), picked in the app's menu. In magpie web the browser
   // downloads it, in the app it goes to Downloads and the status says where.
   function exportBtn(s) {
-    const b = el("button", "text sess-export", t("Export Markdown"));
+    const b = el("button", "text sess-export");
     b.type = "button";
-    b.title = t("Save the whole conversation as a Markdown file");
+    b.setAttribute("aria-haspopup", "menu");
+    b.setAttribute("aria-expanded", "false");
+    b.append(el("span", "", t("Export Markdown")), svg(CHEV, 11, 1.6));
     const q = "agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id);
-    b.onclick = async (e) => {
-      e.stopPropagation();
+    const save = async (only) => {
+      const qo = q + (only ? "&only=" + only : "");
       if (web) {
         const a = el("a");
-        a.href = "/api/sessions/markdown?" + q;
+        a.href = "/api/sessions/markdown?" + qo;
         a.download = "";
         a.click();
         return;
@@ -1505,7 +1542,7 @@ magpie.plugin("sessions", (ctx) => {
       b.disabled = true;
       b.classList.add("busy");
       try {
-        const r = await api("sessions/export?" + q, {});
+        const r = await api("sessions/export?" + qo, {});
         status(t("Saved to {path}", { path: r.path }), "ok");
       } catch (err) {
         status(err.message, "err");
@@ -1513,6 +1550,14 @@ magpie.plugin("sessions", (ctx) => {
         b.disabled = false;
         b.classList.remove("busy");
       }
+    };
+    b.onclick = (e) => {
+      e.stopPropagation();
+      if (b.classList.contains("open")) return closeProtoMenu();
+      openProtoMenu(b, [
+        { v: "", name: "Whole conversation", note: "", title: t("Save the whole conversation as a Markdown file") },
+        { v: "said", name: "Messages only", note: "", title: t("Only what the user and the agent said, without thinking or tool calls") },
+      ], null, (v) => { b.focus({ preventScroll: true }); save(v); }, "Export Markdown", "sess-export-menu", "right");
     };
     return b;
   }
@@ -1569,6 +1614,61 @@ magpie.plugin("sessions", (ctx) => {
     }, (err) => status(err.message, "err"));
   }
 
+  // stepSaid is one step of a turn, in its fold: thinking and what the
+  // agent put in itself fold to their line as they always have; anything
+  // else long shows its first lines, and a click (or Enter) shows it whole
+  // and back, unless it was to select words in it
+  function stepSaid(it) {
+    const n = ledSaid(it.p, it.model);
+    if (n.tagName === "DETAILS") return n;
+    n.querySelector(":scope > .cx-more")?.remove();
+    n.classList.remove("clamp");
+    const text = it.p.text || "";
+    if (text.length <= 240 && text.split("\n").length <= 3 && !it.p.cut) return n;
+    n.classList.add("brief");
+    const whole = (on) => {
+      n.classList.toggle("full", on);
+      n.setAttribute("aria-expanded", on);
+      if (on) stepFull.add(it.p); else stepFull.delete(it.p);
+    };
+    whole(stepFull.has(it.p));
+    n.tabIndex = 0;
+    n.onclick = () => { if (!String(getSelection?.() || "")) whole(!n.classList.contains("full")); };
+    n.onkeydown = (e) => {
+      if (e.target !== n || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      whole(!n.classList.contains("full"));
+    };
+    return n;
+  }
+
+  // restButton reads the parts after those shown and adds them to the
+  // conversation, each box showing it drawn again
+  function restButton(box, k, s, sub, find) {
+    const b = el("button", "text sess-rest", t("Show the rest"));
+    b.type = "button";
+    b.onclick = () => {
+      const got = talks.get(k);
+      if (!got?.tr || b.disabled) return;
+      b.disabled = true;
+      b.textContent = t("Reading…");
+      const after = (got.tr.from || 0) + got.tr.parts.length;
+      api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id) + (sub ? "&sub=" + encodeURIComponent(sub) : "") + "&after=" + after).then((more) => {
+        if (talks.get(k) !== got) return;
+        got.tr = { ...got.tr, parts: [...got.tr.parts, ...(more?.parts || [])], cut: !!more?.cut && (more?.parts || []).length > 0 };
+        for (const currentBox of document.querySelectorAll(".sess-talk")) {
+          if (currentBox.dataset.talk === k) drawTalk(currentBox, s, sub, find);
+        }
+        box.querySelector(":scope > .sess-rest")?.focus({ preventScroll: true });
+      }, (err) => {
+        b.disabled = false;
+        b.textContent = t("Show the rest");
+        status(err.message, "err");
+      });
+    };
+    return b;
+  }
+
   // drawTalk fills box with what was said in a session, read from the
   // agent's own file when it is first shown (only read, never written)
   function drawTalk(box, s, sub = "", find = "") {
@@ -1601,7 +1701,9 @@ magpie.plugin("sessions", (ctx) => {
     // each reply names its model once, at its first part, and again
     // only where the model changes inside it (#2253): the model its own
     // line in the agent's file names, so none where the file names none
-    let said = "", fresh = true, foundOne = false;
+    let said = "", fresh = true;
+    const turns = [];
+    let turn = null;
     for (const p of parts) {
       let model = "";
       if (p.role === "assistant") {
@@ -1609,12 +1711,74 @@ magpie.plugin("sessions", (ctx) => {
         said = p.model || "";
         fresh = false;
       } else if (p.role === "user") fresh = true;
-      const said1 = ledSaid(p, model);
-      if (p.role === "user" && (!p.kind || p.kind === "text")) said1.dataset.turn = "1";
-      if (find && !foundOne && (!p.kind || p.kind === "text" || p.kind === "context") && needleOf(p.text || "").includes(find)) { said1.classList.add("sess-found"); foundOne = true; }
-      out.push(said1);
+      // a turn is the user's words, the steps the agent took, and its
+      // last words, which answer them (usrname1833 on Discord)
+      const it = { p, model, words: p.role === "user" && (!p.kind || p.kind === "text") };
+      const asks = p.role === "user" && (!p.kind || p.kind === "text" || p.kind === "image");
+      if (asks && turn && !turn.rest.length) turn.head.push(it);
+      else if (asks && (it.words || !turn)) turns.push(turn = { head: [it], rest: [] });
+      else {
+        if (!turn) turns.push(turn = { head: [], rest: [] });
+        turn.rest.push(it);
+      }
     }
-    if (got.tr?.cut) out.push(el("p", "cx-none", t("There was more than is shown here")));
+    // the first part a search found is known before anything is drawn, so
+    // the fold that holds it is drawn with its steps
+    const hit = find ? parts.find((p) => (!p.kind || p.kind === "text" || p.kind === "context") && needleOf(p.text || "").includes(find)) : null;
+    let found = null;
+    const node = (it, n) => {
+      if (it.words) n.dataset.turn = "1";
+      if (it.p === hit) { n.classList.add("sess-found"); found = n; }
+      return n;
+    };
+    const open = stepsOpen.get(box.dataset.talk) || new Set();
+    stepsOpen.set(box.dataset.talk, open);
+    turns.forEach((tn, i) => {
+      for (const it of tn.head) {
+        const n = node(it, ledSaid(it.p, it.model));
+        n.classList.add("sess-ask");
+        out.push(n);
+      }
+      let fi = -1;
+      tn.rest.forEach((it, j) => { if (it.p.role === "assistant" && (!it.p.kind || it.p.kind === "text")) fi = j; });
+      const steps = tn.rest.filter((_, j) => j !== fi);
+      if (steps.length) {
+        const d = el("details", "sess-steps");
+        const sum = el("summary");
+        sum.append(el("span", "", t(steps.length === 1 ? "1 step" : "{n} steps", { n: steps.length })), svg(CHEV, 11, 1.6));
+        d.append(sum);
+        // a fold's steps are drawn when it is first opened: a long
+        // session's thinking and tool output stay out of the page until
+        // asked for (usrname1833 on Discord)
+        let drawn = false;
+        const fill = () => { if (!drawn) { drawn = true; d.append(...steps.map((it) => node(it, stepSaid(it)))); } };
+        if (open.has(i) || steps.some((it) => it.p === hit)) fill();
+        // drawn on the click, before the fold opens, so it never opens
+        // empty; what the click does is kept at once, since toggle comes a
+        // task later and a sheet drawn again before it would undo the click
+        sum.addEventListener("click", () => { fill(); if (d.open) open.delete(i); else open.add(i); });
+        d.open = open.has(i);
+        // a fold drawn over since says nothing about the one now shown
+        d.addEventListener("toggle", () => { if (!d.isConnected) return; if (d.open) { fill(); open.add(i); } else open.delete(i); });
+        out.push(d);
+      }
+      if (fi >= 0) {
+        const it = tn.rest[fi];
+        // the fold may hold where this reply's model was named
+        const n = node(it, ledSaid(it.p, it.model || it.p.model || ""));
+        n.classList.add("sess-final");
+        out.push(n);
+      }
+    });
+    // what a search found is shown, in whatever fold holds it
+    const fold = found?.closest(".sess-steps");
+    if (fold) fold.open = true;
+    if (found?.classList.contains("brief")) found.classList.add("full");
+    // a long session is read a part at a time: the rest of the agent's
+    // file is read when asked, never left out unsaid (usrname1833 on
+    // Discord). What the gateway kept has no rest to read.
+    if (got.tr?.cut && got.tr?.source !== "gateway") out.push(restButton(box, k, s, sub, find));
+    else if (got.tr?.cut) out.push(el("p", "cx-none", t("There was more than is shown here")));
     out.push(el("p", "cx-src", t(got.tr?.source === "gateway" ? "Recorded gateway traffic only; earlier, expired or uncaptured content may be missing" : "Read from the agent's session file; magpie keeps no copy")));
     box.replaceChildren(...out);
     box.dispatchEvent(new Event("talkdrawn"));
@@ -1664,8 +1828,11 @@ magpie.plugin("sessions", (ctx) => {
       const tops = ts.map(at);
       const atEnd = y + body.clientHeight >= body.scrollHeight - 1;
       const here = ts.length ? (atEnd ? ts.length : Math.max(1, tops.filter((x) => x <= y + SLACK).length)) : 0;
+      // a long session is read a part at a time: its turns are counted
+      // in the whole file, and those before what is shown (usrname1833)
+      const tr = talks.get(k)?.tr, before = tr?.turnsBefore || 0;
       count.hidden = !ts.length;
-      count.textContent = here + " / " + ts.length;
+      count.textContent = (before + here) + " / " + Math.max(tr?.turns || 0, before + ts.length);
       prev.disabled = !tops.some((x) => x < y - SLACK);
       next.disabled = here >= ts.length;
       top.disabled = y <= 0;

@@ -144,6 +144,10 @@ type appPage struct {
 
 var appPageServer = &appPage{wake: make(chan struct{}, 1)}
 
+// appPageWhere is where a browser turned away from the app's page finds
+// the key: no magpie web printed one (jenryai on X).
+const appPageWhere = "the k= in the link in the magpie app's Settings › Network and sharing › Browser access"
+
 // appPageRetry is how often a busy port is tried again.
 var appPageRetry = 4 * time.Second
 
@@ -217,7 +221,7 @@ func (p *appPage) apply() {
 		p.page = p.mk()
 	}
 	if p.key != c.Key || p.cur.Load() == nil {
-		h := webServed(strconv.Itoa(c.port()), c.Key, webCookieAge, nil, p.page)
+		h := webServed(strconv.Itoa(c.port()), c.Key, appPageWhere, nil, p.page)
 		p.cur.Store(&h)
 		p.key = c.Key
 	}
@@ -328,12 +332,20 @@ func appPageRoutes(mux *http.ServeMux) {
 				c.Port = 0
 			}
 		}
+		old := c.Key
 		if in.NewKey || CheckWebKey(c.Key) != nil {
 			c.Key = NewWebKey()
 		}
 		if err := saveAppPage(c); err != nil {
 			fail(rw, err)
 			return
+		}
+		// the passkeys made under the old key go with it: none signs
+		// in under the new one (webGuard), and none is left behind
+		if old != c.Key && old != "" {
+			if err := dropPasskeysUnder(old); err != nil {
+				log.Printf("browser access: the old key's passkeys can't be removed: %v", err)
+			}
 		}
 		appPageServer.apply()
 		appPageServer.nudge()

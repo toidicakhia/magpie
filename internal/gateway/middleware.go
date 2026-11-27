@@ -38,9 +38,11 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	}
 	w, recorded := recordConversation(w, r, from, body)
 	defer recorded()
-	// a conversation going round one tool call is answered here, before
-	// anything of it is asked of a hook, a middleware or a provider
-	if s.stoppedToolLoop(w, r, from, body) {
+	// a conversation going round one tool call has the model told so, and
+	// is answered here when it goes on after that, before anything of it
+	// is asked of a hook, a middleware or a provider
+	body, stopped := s.toolLoopGuard(w, r, from, body)
+	if stopped {
 		return
 	}
 	w, body, hooked := gatewayHooks(w, r, from, body)
@@ -50,7 +52,7 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 		s.serve(w, r, from, body)
 		return
 	}
-	info := gwmw.Info{Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r)}
+	info := gwmw.Info{Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r), Caller: pluginCaller(r.Context())}
 	var runs mwRuns
 	for _, a := range agents {
 		// the user's middleware runs before a route is begun: a wait
@@ -161,7 +163,7 @@ func gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol
 	if !plugin.HasGateway() {
 		return w, body, func() {}
 	}
-	info := plugin.GatewayContext{Origin: gatewayOrigin(r), Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r), Session: sessionOf(r.Header), Kind: hookKind(r, agentOf(r))}
+	info := plugin.GatewayContext{Origin: gatewayOrigin(r), Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r), Session: sessionOf(r.Header), Kind: hookKind(r, agentOf(r)), Caller: pluginCaller(r.Context())}
 	if req, err := parse(from, body); err == nil {
 		info.Cwd = workDir(req)
 		info.Query = gatewayQuery(req)

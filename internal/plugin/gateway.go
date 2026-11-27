@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/gwmw"
+
 	"github.com/yetone/magpie/internal/filememo"
 )
 
@@ -95,6 +97,10 @@ type GatewayContext struct {
 	// x-openai-subagent), and "" for any other: the main conversation,
 	// and a client that doesn't say. Per request, never per session.
 	Kind string `json:"kind"`
+	// Caller is the agent the request came from, through any magpies that
+	// passed it on (gwmw.Caller, chat.headers' input.caller); nil, and
+	// absent from ctx, when no agent is known. Agent stays agentOf's.
+	Caller *gwmw.Caller `json:"caller,omitempty"`
 }
 
 // GatewayState is aggregate diagnostics for this host's lifetime. Outcomes
@@ -260,12 +266,23 @@ func GatewayBegin(ctx context.Context, body []byte, info GatewayContext) *Gatewa
 		return nil
 	}
 	var out struct {
-		ID    string          `json:"id"`
-		Token string          `json:"token"`
-		Body  json.RawMessage `json:"body"`
+		ID        string          `json:"id"`
+		Token     string          `json:"token"`
+		Unchanged bool            `json:"unchanged"`
+		Body      json.RawMessage `json:"body"`
 	}
 	err = h.call(total, "gatewayRequest", map[string]any{"operation": "begin", "body": json.RawMessage(body), "context": info}, &out)
-	if err != nil || out.ID == "" || out.Token == "" || len(out.Body) == 0 || out.Body[0] != '{' || !json.Valid(out.Body) {
+	if err != nil || out.ID == "" || out.Token == "" {
+		return nil
+	}
+	if out.Unchanged {
+		// every hook left the request as it came, so the host sent back the
+		// run's identity only (#5699): the body is the caller's own bytes, as
+		// with no hook at all, and a request too big for one line of the
+		// host's no longer kills the host every plugin shares
+		return &GatewayRun{Body: body, h: h, id: out.ID, token: out.Token}
+	}
+	if len(out.Body) == 0 || out.Body[0] != '{' || !json.Valid(out.Body) {
 		return nil
 	}
 	// the run ends when its owner finishes or closes it, never when the

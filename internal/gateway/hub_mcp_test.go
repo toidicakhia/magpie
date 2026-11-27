@@ -26,9 +26,13 @@ type fakeHub struct {
 	servers map[string][]HubServer
 	calls   []string
 	call    func(ctx context.Context, server, tool string) (json.RawMessage, error)
+	met     []string // the agents Met was told of
+	version string   // what Version says
 }
 
 func (f *fakeHub) On() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.on }
+
+func (f *fakeHub) Version() string { f.mu.Lock(); defer f.mu.Unlock(); return f.version }
 
 func (f *fakeHub) Tools(_ context.Context, agent string) []HubTool {
 	f.mu.Lock()
@@ -56,6 +60,18 @@ func (f *fakeHub) Call(ctx context.Context, agent, server, tool string, args jso
 func (f *fakeHub) Stop()  {}
 func (f *fakeHub) Prune() {}
 
+func (f *fakeHub) Met(agent string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.met = append(f.met, agent)
+}
+
+func (f *fakeHub) metAgents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.met...)
+}
+
 func (f *fakeHub) ran() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -70,7 +86,7 @@ func hubSpec(name string) map[string]json.RawMessage {
 	}
 }
 
-func withHub(t *testing.T, f *fakeHub) {
+func withHub(t *testing.T, f Hub) {
 	t.Helper()
 	old := MCPHub
 	MCPHub = f
@@ -126,7 +142,7 @@ func TestHubMCPListsAndRoutes(t *testing.T) {
 			t.Errorf("%q is past 64 characters", x.Name)
 		}
 	}
-	want := []string{"github__create_issue", "my-server__do-it", "my-server__do-it_2", "fs__" + strings.Repeat("x", 60)}
+	want := []string{"github__create_issue", "my-server__do-it", "my-server__do-it_2", "fs__" + strings.Repeat("x", 60), hubCodeTool}
 	if strings.Join(names, " ") != strings.Join(want, " ") {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
@@ -228,7 +244,7 @@ func TestHubMCPForAnyApp(t *testing.T) {
 	for _, x := range readMCP(t, hubPostAt(h, HubMCPAll, here, toolsList)).Result.Tools {
 		names = append(names, x.Name)
 	}
-	if strings.Join(names, " ") != "github__create_issue notes__find" {
+	if strings.Join(names, " ") != "github__create_issue notes__find "+hubCodeTool {
 		t.Fatalf("another app's tools %v", names)
 	}
 	m := readMCP(t, hubPostAt(h, HubMCPAll, here, toolsCall("notes__find", `{"q":"x"}`)))
@@ -480,14 +496,16 @@ func whereReply(t *testing.T, h http.Handler, addr string, hdr ...string) (instr
 	}
 	var list struct {
 		Result struct {
-			Tools []struct{ Description string }
+			Tools []struct{ Name, Description string }
 		}
 	}
 	if err := json.Unmarshal(hubPost(h, "claude", addr, toolsList, hdr...).Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
 	for _, x := range list.Result.Tools {
-		descs = append(descs, x.Description)
+		if x.Name != hubCodeTool { // the servers' tools; run_code is the router's own
+			descs = append(descs, x.Description)
+		}
 	}
 	return init.Result.Instructions, init.Result.ServerInfo.Title, descs
 }
@@ -672,4 +690,69 @@ func TestHubMCPRemoteEntryNeedsKey(t *testing.T) {
 	if m.Result.IsError || len(f.ran()) != 2 {
 		t.Fatalf("through a proxy, with its key: %+v, ran %q", m, f.ran())
 	}
+}
+
+// An agent on another computer using a magpie in Docker (bitxeno303 on
+// X: DeepSeek Harness at /mcp/magpie/hub/dsh got no tools) is told to the
+// Library (Hub.Met) when it connects, with its key, from there, its
+// project's key cut off, and before its tools are listed. A call from this
+// computer, a web page's, another magpie's router or the address any app
+// is given meets no agent.
+func TestHubMCPMeetsAgentFromAnotherComputer(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "")
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	t.Setenv("MAGPIE_TRUST_PROXY", "")
+	f := &fakeHub{on: true}
+	withHub(t, f)
+	h := lanGuard(New().Handler())
+	_, secrets := newCaller(t, "Remote client") // shares magpie
+	key := []string{"Authorization", "Bearer " + secrets[0]}
+	const there = "172.17.0.1:40000" // the host, as a container sees it
+	init := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`
+
+	hubPost(h, "dsh", here, init)
+	hubPost(h, "dsh", here, toolsList)
+	hubPostAt(h, HubMCPAll, there, toolsList, key...)
+	hubPost(h, "dsh", there, toolsList, append([]string{"Origin", "http://192.0.2.7:3430", "Sec-Fetch-Site", "same-origin"}, key...)...)
+	hubPost(h, "dsh", there, toolsList, append([]string{RouterHeader, "1"}, key...)...)
+	if got := f.metAgents(); len(got) != 0 {
+		t.Fatalf("met %q from this computer, a page, another router or the address for any app", got)
+	}
+	if w := hubPost(h, "dsh", there, init, key...); w.Code != http.StatusOK {
+		t.Fatalf("initialize from there: %d %s", w.Code, w.Body)
+	}
+	if w := hubPost(h, "dsh"+HubProjectSep+"abc123", there, toolsList, key...); w.Code != http.StatusOK {
+		t.Fatalf("tools/list from there: %d %s", w.Code, w.Body)
+	}
+	if got := f.metAgents(); !slices.Equal(got, []string{"dsh", "dsh"}) {
+		t.Fatalf("met %q, want dsh on initialize and on tools/list", got)
+	}
+}
+
+// What Met records is listed at once: the first tools/list of an agent on
+// another computer has the servers Met gave it.
+func TestHubMCPMetBeforeListing(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "")
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	t.Setenv("MAGPIE_TRUST_PROXY", "")
+	f := &meetingHub{fakeHub: fakeHub{on: true, tools: map[string][]HubTool{}}}
+	withHub(t, f)
+	h := lanGuard(New().Handler())
+	_, secrets := newCaller(t, "Remote client")
+	m := readMCP(t, hubPost(h, "dsh", "172.17.0.1:40000", toolsList, "Authorization", "Bearer "+secrets[0]))
+	if len(m.Result.Tools) == 0 || m.Result.Tools[0].Name != "notes__find" {
+		t.Fatalf("first tools/list: %+v", m)
+	}
+}
+
+// meetingHub gives an agent it meets the notes server, as the Library does.
+type meetingHub struct{ fakeHub }
+
+func (f *meetingHub) Met(agent string) {
+	f.fakeHub.Met(agent)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tools[agent] = []HubTool{{Server: "notes", Tool: "find", Spec: hubSpec("find")}}
 }

@@ -23,7 +23,8 @@ import (
 // them as xd:// devices named in a catalog, and Antigravity and agy, which
 // list an MCP tool by name only and read its schema file when it is called
 // for. Any other agent sends every
-// tool it is given, with its whole inputSchema, on every request, so past
+// tool it is given, with its whole inputSchema, on every request, and so
+// does one of those whose search the user turned off (HubSearchOff), so past
 // hubOnDemandOver tools it is given two in their place: find_tools, which
 // gives the tools that match what the model looks for with their
 // parameters, and call_tool, which runs one by name. find_tools' own
@@ -44,7 +45,9 @@ const (
 const hubOnDemandOver = 10
 
 // hubSearchesItself are the agents that load MCP tools only when searched
-// for, by their id without a WSL distro (claude@wsl:Ubuntu is claude).
+// for, by their id without a WSL distro or a profile (hubKindOf:
+// claude@wsl:Ubuntu, a Claude Code config folder's claude#work and omp's
+// profile omp#work are claude, claude and omp).
 // Droid (0.231) defers every MCP tool but GitHub's and agent-browser's to
 // its ToolSearch, which matches the names and descriptions it is given, and
 // omp (18.9) mounts every MCP tool as an xd:// device, its schema read only
@@ -59,6 +62,17 @@ const hubOnDemandOver = 10
 // their place it searched twice (izhidigua on X, 11-19).
 // The Library's Tools on demand row names them from HubFindsItself, so its
 // words can't leave one out again (they named four of the six, 11-18).
+// Cindy isn't one (T_t__biu on X, #7873, Cindy 0.1.146): the only runtime
+// of its own that reaches /mcp/magpie/hub/cindy is its Codex (codex-home's
+// config.toml; its Pi gets MCP servers only from Cindy's own database,
+// which magpie never writes, and its Claude Code reads ~/.claude.json,
+// hub/claude). That Codex defers MCP tools only for a model
+// whose catalog entry has supports_search_tool, and Cindy's catalog
+// (catalogWithModels in maker-host) copies the flag only for a GPT slug
+// that matches its own bundled catalog: a model of magpie's under any other
+// name gets the fallback entry, with no supports_search_tool, so Cindy's
+// Codex sends every tool whole on every request. find_tools and call_tool
+// are what keep those requests small.
 var hubSearchers = []string{"claude", "claude-desktop", "codex", "pi", "droid", "omp", "agy", "antigravity"}
 
 var hubSearchesItself = func() map[string]bool {
@@ -71,8 +85,11 @@ var hubSearchesItself = func() map[string]bool {
 
 // HubFindsItself is the agents given every tool whole because they search
 // their MCP tools themselves (hubSearchesItself), by id, in the order the
-// Library names them.
-func HubFindsItself() []string { return slices.Clone(hubSearchers) }
+// Library names them: one whose search the user turned off
+// (HubSearchOff) is given its tools on demand and isn't named.
+func HubFindsItself() []string {
+	return slices.DeleteFunc(slices.Clone(hubSearchers), hubSearchOff)
+}
 
 // HubOnDemandOver is hubOnDemandOver, for the Library to say.
 const HubOnDemandOver = hubOnDemandOver
@@ -84,18 +101,63 @@ const (
 	hubFindMore = 15
 )
 
+// HubOnDemandParam and HubOnDemandValue are the query the address for any
+// other app (HubMCPAll) takes to give its tools on demand: which app
+// connects there isn't known, so without it every tool is listed whole (an
+// app that searches its MCP tools itself wants them so), and an app that
+// sends every tool on every request asks for find_tools and call_tool with
+// /mcp/magpie/hub?tools=on-demand (Passings_z on X, 11-21: their own
+// harness got every tool with Tools on demand on).
+const (
+	HubOnDemandParam = "tools"
+	HubOnDemandValue = "on-demand"
+)
+
+// HubOnDemandQuery is HubOnDemandParam=HubOnDemandValue, for the Library to
+// give.
+const HubOnDemandQuery = HubOnDemandParam + "=" + HubOnDemandValue
+
+// hubAsksOnDemand is whether r asks for the tools on demand (HubOnDemandParam).
+func hubAsksOnDemand(r *http.Request) bool {
+	return r.URL.Query().Get(HubOnDemandParam) == HubOnDemandValue
+}
+
 // hubOnDemand is whether agent is given find_tools and call_tool in place
-// of its n tools. The address for any other app ("") lists every tool:
-// which app connects there isn't known.
-func hubOnDemand(agent string, n int) bool {
-	if agent == "" || n <= hubOnDemandOver {
+// of its n tools. The address for any other app ("") lists every tool
+// unless asked for them on demand (hubAsksOnDemand).
+func hubOnDemand(agent string, n int, asked bool) bool {
+	if (agent == "" && !asked) || n <= hubOnDemandOver {
 		return false
 	}
-	id, _, _ := strings.Cut(HubAgentOf(agent), "@")
-	if hubSearchesItself[id] {
+	if hubSearchesItself[hubKindOf(agent)] && !hubSearchOff(HubAgentOf(agent)) {
 		return false
 	}
 	return !settings.Shared().RouterAllTools
+}
+
+// HubSearchOff says whether an agent that searches its MCP tools itself
+// (hubSearchesItself), by its id, has that search turned off by the
+// user's own settings: a Claude Code with ENABLE_TOOL_SEARCH=false sends
+// every tool it is given whole on every request, as any other agent does,
+// so it is given them on demand (jjaychen1e on X, #7349: 89 tools, ~38K
+// tokens, on each request, and a Claude Code past 50 deferred tools on a
+// route that doesn't take them, whose loads change the tools mid-session,
+// is one the user can turn search off for). agent.HubSearchOff, set by
+// the cli; nil, every such agent searches.
+var HubSearchOff func(agent string) bool
+
+func hubSearchOff(agent string) bool { return HubSearchOff != nil && HubSearchOff(agent) }
+
+// hubKindOf is the agent a hub address's agent is one of: its id without
+// a project's key, a WSL distro or a profile. A profile is the same
+// program in a folder of its own (claude#work is Claude Code with
+// CLAUDE_CONFIG_DIR=~/.claude-work, omp#work omp's profiles/work), so it
+// searches its tools as the program does: read as an agent of its own,
+// each was given find_tools in place of the tools it searches itself.
+func hubKindOf(agent string) string {
+	id, _, _ := strings.Cut(HubAgentOf(agent), "@")
+	id, _, _ = strings.Cut(id, "#")
+	return id
 }
 
 // hubToolCount is how many tools ss have, as the instructions know them.
@@ -153,6 +215,37 @@ func hubOnDemandSpecs(where string, ss []HubServer) []any {
 			"inputSchema": json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"The tool's name, <server>__<tool>"},"arguments":{"type":"object","description":"The tool's arguments, as its inputSchema says"}},"required":["name"]}`),
 		},
 	}
+}
+
+// An agent that defers MCP tools behind a search of its own shows its
+// model only a line for each server, so an ask that doesn't name a tool
+// goes to whatever it declares instead: Pi 1.6 with archify drew an
+// architecture as a skill's diagram, never seeing publish_artifact
+// (owner, 11-24). A tool whose _meta says it is always loaded is declared
+// whole: Claude Code reads "anthropic/alwaysLoad" (2.x: "never deferred
+// behind tool search"), Antigravity "antigravity/alwaysLoad"; the hub
+// keeps it listed beside find_tools and call_tool, and Pi, which reads no
+// _meta, is given it as toolExposure "direct" (library's piDirect).
+const (
+	hubAlwaysClaude = "anthropic/alwaysLoad"
+	hubAlwaysAgy    = "antigravity/alwaysLoad"
+)
+
+func hubAlwaysLoadMeta() map[string]any {
+	return map[string]any{hubAlwaysClaude: true, hubAlwaysAgy: true}
+}
+
+// hubAlwaysLoaded is whether t's server marks it always loaded.
+func hubAlwaysLoaded(t hubTool) bool {
+	var m map[string]any
+	json.Unmarshal(t.Spec["_meta"], &m)
+	return m[hubAlwaysClaude] == true || m[hubAlwaysAgy] == true
+}
+
+// HubToolName is the name the hub gives server's tool, as hubNamed makes
+// it for a name no other tool shares.
+func HubToolName(server, tool string) string {
+	return cutName(unsafeToolChars.ReplaceAllString(server, "-")+hubSep+unsafeToolChars.ReplaceAllString(tool, "-"), 64)
 }
 
 // hubSpecOf is t as tools/list gives it: its own spec, named as the hub
@@ -577,9 +670,9 @@ func hubCallArgs(args json.RawMessage) (name string, inner json.RawMessage, err 
 	return strings.TrimSpace(p.Name), inner, nil
 }
 
-// hubCallNamed is the tool call_tool names: as tools/call finds it
-// (hubToolNamed), else the one tool of that name on its server, in any
-// case.
+// hubCallNamed is the tool call_tool and run_code name: as tools/call
+// finds it (hubToolNamed), else the one tool of that name on its server,
+// in any case, else the one tool the agent's own name for it ends with.
 func hubCallNamed(ctx context.Context, ts []hubTool, agent, name string) (hubTool, bool) {
 	if t, ok := hubToolNamed(ctx, ts, agent, name); ok {
 		return t, true
@@ -590,10 +683,34 @@ func hubCallNamed(ctx context.Context, ts []hubTool, agent, name string) (hubToo
 			found = append(found, t)
 		}
 	}
+	if len(found) == 0 {
+		found = hubAgentNamed(ts, name)
+	}
 	if len(found) != 1 {
 		return hubTool{}, false
 	}
 	return found[0], true
+}
+
+// hubAgentNamed are the tools whose name the agent's own name for a tool
+// of this router ends with, word for word: Alma calls cities__weather
+// magpie__cities_weather and Claude Code mcp__magpie__cities__weather,
+// and a model writing run_code's script reaches for the name it was
+// given (a real Alma run: one failed try a turn). Words are runs of
+// letters and digits, so "s__weather" is never "cities__weather".
+func hubAgentNamed(ts []hubTool, name string) []hubTool {
+	words := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	var found []hubTool
+	for _, t := range ts {
+		want := strings.Join(strings.FieldsFunc(strings.ToLower(t.name), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }), "")
+		for k := 1; k < len(words); k++ {
+			if strings.Join(words[k:], "") == want {
+				found = append(found, t)
+				break
+			}
+		}
+	}
+	return found
 }
 
 // hubCallByName answers call_tool: the tool it names run as tools/call runs

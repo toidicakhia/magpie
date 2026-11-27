@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -54,14 +55,7 @@ type sessionsJSON struct {
 // page and a detail (MergeExternal) never read them, and copying every
 // session's days for each poll of an open Sessions page was ~1.8 GB in 4
 // minutes over ~720k calls (#2776). The stats add them (gatewayDays).
-func gatewayExternal(g usage.GatewaySession) sessions.ExternalSession {
-	e := sessions.ExternalSession{Agent: g.Agent, ID: g.ID, Start: g.Start, Last: g.Last, Tokens: g.Tokens, Cost: g.Cost, Unpriced: g.Unpriced}
-	e.Models = make([]sessions.ExternalModel, 0, len(g.Models))
-	for _, m := range g.Models {
-		e.Models = append(e.Models, sessions.ExternalModel{Model: m.Model, Tokens: m.Tokens, Cost: m.Cost, Priced: m.Priced})
-	}
-	return e
-}
+func gatewayExternal(g usage.GatewaySession) sessions.ExternalSession { return g.External() }
 
 // gatewayDays is a gateway session's usage by day, as the stats count it.
 func gatewayDays(g usage.GatewaySession) []sessions.ExternalDayUsage {
@@ -90,21 +84,7 @@ func gatewayListed(g usage.GatewaySession, title func(agent, id string) string) 
 // ~150 MB, and each was looked for in the store of what was asked
 // (GatewayTitler).
 func listedExternal(nativeKeys map[string]bool, n int) []sessions.ExternalSession {
-	hidden := sessions.GatewayHidden()
-	title := sessions.GatewayTitler()
-	var ext []sessions.ExternalSession
-	usage.EachGatewaySession(nativeKeys, func(g usage.GatewaySession) bool {
-		if len(ext) == n {
-			return false
-		}
-		// one a list leaves out (externalSessions) takes no room; nor does
-		// one that spent nothing, with no file behind it (SpentNothing)
-		if g.Agent != "" && g.ID != "" && !hidden(g.Agent, g.ID, g.Last) && !g.SpentNothing() {
-			ext = append(ext, gatewayListed(g, title))
-		}
-		return true
-	})
-	return ext
+	return usage.ListedGateway(nativeKeys, n)
 }
 
 func gatewaySession(g usage.GatewaySession) sessions.Session {
@@ -338,17 +318,32 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		// (#2261)
 		// find: the words a search found in it, so that the part they
 		// are in is among those read (a long session's is cut)
-		read := sessions.TranscriptOf
-		if find := sessions.NeedleOf(q.Get("find")); find != "" {
+		// after: the parts after the first n, the rest of one that was
+		// cut, which the sheet reads when asked (usrname1833 on Discord)
+		after, _ := strconv.Atoi(q.Get("after"))
+		read := func(s sessions.Session) (sessions.Transcript, error) { return sessions.TranscriptAfter(s, after) }
+		if find := sessions.NeedleOf(q.Get("find")); find != "" && after <= 0 {
 			read = func(s sessions.Session) (sessions.Transcript, error) { return sessions.TranscriptAt(s, find) }
 		}
 		if sub := q.Get("sub"); sub != "" {
-			read = func(s sessions.Session) (sessions.Transcript, error) { return sessions.SubagentTranscript(s, sub) }
+			read = func(s sessions.Session) (sessions.Transcript, error) {
+				return sessions.SubagentTranscriptAfter(s, sub, after)
+			}
 		}
 		t, err := read(s)
 		if err != nil {
 			fail(rw, err)
 			return
+		}
+		// the first read of a long session counts its turns in the whole
+		// file, for the sheet's "turn i / N" (usrname1833 on Discord); a
+		// count that fails leaves N to what was read
+		if after <= 0 {
+			if sub := q.Get("sub"); sub != "" {
+				t, _ = sessions.SubagentCounted(s, sub, t)
+			} else {
+				t, _ = sessions.Counted(s, t)
+			}
 		}
 		writeJSON(rw, t)
 	})
@@ -356,9 +351,11 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 	// read from the agent's own file as transcript is: to the browser that
 	// asks (magpie web), which saves it itself, and, in the app, to
 	// Downloads.
+	// only=said keeps only what the user and the agent said, no thinking
+	// or tools (usrname1833 on Discord)
 	mux.HandleFunc("GET /api/sessions/markdown", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"))
+		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"), keptOf(q.Get("only")))
 		if err != nil {
 			fail(rw, err)
 			return
@@ -369,7 +366,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 	})
 	mux.HandleFunc("POST /api/sessions/export", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"))
+		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"), keptOf(q.Get("only")))
 		if err != nil {
 			fail(rw, err)
 			return
@@ -463,6 +460,42 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	// agents/reveal shows an agent's settings file, the one magpie writes,
+	// in the file manager, from its row's menu (InkCoalW on X: its whole
+	// file at hand, as CC Switch has it). The page sends only the agent's
+	// id; the path is the agent's as detected, never one the page names.
+	mux.HandleFunc("POST /api/agents/reveal", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Agent string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if isWeb(w) {
+			fail(rw, errors.New("showing a file is only for the desktop app"))
+			return
+		}
+		path := ""
+		for _, a := range agent.Detected() {
+			if a.ID == in.Agent {
+				path = a.Path
+			}
+		}
+		if path == "" {
+			fail(rw, errors.New("no settings file for this agent"))
+			return
+		}
+		var err error
+		if _, e := os.Stat(path); e == nil {
+			err = revealIn(w, path)
+		} else {
+			err = w.OpenFolder(filepath.Dir(path))
+		}
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		rw.WriteHeader(http.StatusNoContent)
+	})
 	// carry converts a session for another agent (one its Carry offers with
 	// Convert): a new session of that agent's, in its own folder, the
 	// source only read. It runs only when the user picks the agent, never
@@ -510,7 +543,16 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 // transcript reads it: the agent of one that reaches this magpie through a
 // remote magpie ran on another machine, so there is no file of it here, and
 // its download was a 400 "no such session" (akic404 on Discord).
-func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
+// keptOf is what an export's only= asks it to keep: "said", what the user
+// and the agent said; anything else, the whole conversation.
+func keptOf(only string) sessions.Kept {
+	if only == "said" {
+		return sessions.KeepSaid
+	}
+	return sessions.KeepAll
+}
+
+func sessionMarkdown(agentID, id string, keep sessions.Kept) (stem string, md []byte, err error) {
 	s, ok := sessions.Find(agentID, id)
 	var t sessions.Transcript
 	if !ok {
@@ -531,9 +573,9 @@ func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
 	}
 	var b bytes.Buffer
 	if ok {
-		err = sessions.WriteMarkdown(&b, s, wslName(name, s))
+		err = sessions.WriteMarkdownKept(&b, s, wslName(name, s), keep)
 	} else {
-		err = sessions.WriteGatewayMarkdown(&b, s, name, t)
+		err = sessions.WriteGatewayMarkdownKept(&b, s, name, t, keep)
 	}
 	if err != nil {
 		return "", nil, err
@@ -548,7 +590,11 @@ func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
 		}
 		return '-'
 	}, s.Agent+"-"+string(short))
-	return "magpie-session-" + safe, b.Bytes(), nil
+	stem = "magpie-session-" + safe
+	if keep == sessions.KeepSaid {
+		stem += "-messages"
+	}
+	return stem, b.Bytes(), nil
 }
 
 // wslName is an agent's name for a session it ran in a WSL distro, as the
@@ -909,7 +955,7 @@ func combinedSessionStatsAll(days []int) []sessions.Stats {
 func withGatewaySessions(st sessions.Stats, days int, nativeKeys map[string]bool) sessions.Stats {
 	var since time.Time
 	if days > 0 && st.From != "" {
-		since, _ = time.ParseInLocation(time.DateOnly, st.From, time.Local)
+		since, _ = time.ParseInLocation(time.DateOnly, st.From, sessions.Local())
 	}
 	gs, gd := usage.GatewaySessionWindowExcept(since, nativeKeys)
 	ext := make([]sessions.ExternalSession, 0, len(gs))

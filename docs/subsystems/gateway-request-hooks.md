@@ -42,11 +42,22 @@ reply it asked for). A rolled-back hook counts as failed and gets no `onResponse
 for that request. It cannot reject requests or register tools. The synchronous middleware API remains available separately.
 
 Context fields: `protocol` (`chat`, `responses`, `anthropic`, `gemini`), `model`,
-`stream`, `path`, `origin`, `agent`, `session`, `cwd`, `query`, `kind`, package `options`, private
+`stream`, `path`, `origin`, `agent`, `caller`, `session`, `cwd`, `query`, `kind`, package `options`, private
 request `state`, an `AbortSignal` and `report(code, bytes)`. Headers and client
 credentials are not forwarded to the hook. Query extraction keeps original model
 input intact while excluding client environment/instruction notices from recall.
 Empty identity fields must not be interpreted as authenticated user identity.
+
+`caller` is `{agent, name, via}`, the agent the request came from through
+any magpies that passed it on: the JS middleware's `ctx.caller` and
+`chat.headers`' `input.caller`, from one function (`pluginCaller` in
+`internal/gateway/plugin_caller.go`). `agent` stays `agentOf(r)`, the
+client that sent this request (`magpie` for one passed on). It is the same
+in `onRequest` and that request's `onResponse`, absent when the gateway
+knows no agent, and each hook gets its own copy of the context, so one
+hook's change to it reaches no other (`TestAsyncGatewayHookToldTheCaller`).
+A request hook still can't refuse a request; a middleware's `ctx.reject`
+can, before a provider is picked.
 
 `kind` is `"subagent"` when the client says the request is a subagent's
 (Claude Code's `x-claude-code-agent-id`, Codex's `x-openai-subagent:
@@ -156,6 +167,16 @@ Host request state is limited to 128 runs and expires after 15 minutes. The
 response RPC has the request RPC's limit (the budget plus one second, at least
 eleven seconds); each callback uses the configured bounded hook timeout. Request-owned state is released after notification.
 
+The host answers the request RPC over one stdout line, which Go reads up to
+`maxWireLine` (32 MiB, told to the host at init as `lineMax`); a longer line
+used to kill the shared host and every plugin's request with it (#5699). When
+no hook changed the request, the answer is `{id, token, unchanged: true}` with
+no body, and the gateway sends the caller's own bytes, as it does with no hook
+installed. A changed body that makes the answer longer than the line gives up
+that hook run: the request goes on unchanged, its run is closed and gets no
+`onResponse`, and a warning is logged. Any other answer or event too long for
+a line fails only its own call (#7306): a plugin's error text, an RPC result.
+
 ## Sources and verification
 
 - `internal/plugin/gateway.go`: entry discovery, cancellation, completion dispatch.
@@ -174,9 +195,11 @@ eleven seconds); each callback uses the configured bounded hook timeout. Request
   max-images=8 max-images.<model>=10`) and the one a 400 taught that
   provider's model: Copilot's words on a Copilot account, and
   100milionseek's and Coarena's own words, which name their vendor, on any
-  provider. Every image counts, those in a tool_result too; the oldest go
-  first, the latest user message's are kept, and a request with no cap or
-  within it goes as the same bytes. Session files are never touched.
+  provider. Every image counts, those in a tool_result too. An image the
+  request carries again byte for byte is left out where it came earlier
+  first (`imageShownLater`, the latest copy kept); then the oldest go,
+  with every earlier copy of one; the latest user message's are kept, and
+  a request with no cap or within it goes as the same bytes. Session files are never touched.
 - `internal/gateway/gateway_hooks.go`: bounded response observation and
   `gatewayReply`, a stream made one reply.
 - `internal/gateway/signin_hooks.go`: sign-in events, and
@@ -189,6 +212,11 @@ eleven seconds); each callback uses the configured bounded hook timeout. Request
   8000 ms hooks still sharing ten seconds, an over-long timeout
   clamped, caller cancellation under a long budget, and the Go mirror of the
   budget.
+  `internal/plugin/gateway_wire_test.go`: a body over 32 MiB that no hook
+  changed, one whose hook timed out, and one a hook grew past the line each
+  keep the request and the host; a small rewrite still arrives; and
+  `TestPluginAnswerTooLongFailsThatCallOnly` fails only a fetch whose error
+  text is over the line.
   `TestGatewaySignInHook` (a sign-in-only hook, options, a throwing hook)
   and `TestRevokedAccountToldToHooksOnce` (a revoked ChatGPT account told
   once, not before a hook is installed, with no token) guard sign-ins.

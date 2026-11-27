@@ -2,16 +2,18 @@
 // models went onto the C: drive): where they are downloaded, under an
 // Advanced fold since it is set once. Move… picks a folder in the system's
 // picker and the models are moved there in the background, copied and
-// checked before the old ones go; Move back is magpie's cache. app.js
-// imports this the first time the model row draws, so it weighs nothing on
-// the core.
+// checked before the old ones go; Move back is magpie's cache.
+// privacymodel.js imports this, so it weighs nothing on the core.
 let pmFolderOpen = false;
 window.pmFolder = function (row, score, m, act) {
-  // under the threshold's row, or the model's own while that is out
+  // last in the card, under Rules too: Advanced closes its card rather than
+  // sitting between two of its rows (the owner, 11-21: 这个高级没有左对齐)
   let box = document.getElementById("pmFolderRow");
-  if (!row.isConnected || !m?.folder || (!m.supported && !m.installed && !m.folderSet)) return void box?.remove();
-  if (!box) (box = el("div")).id = "pmFolderRow";
-  if (box.previousElementSibling !== (score.isConnected ? score : row)) (score.isConnected ? score : row).after(box);
+  // a draw the page has since replaced leaves the new one's fold alone
+  if (!row.isConnected) return;
+  if (!m?.folder || (!m.supported && !m.installed && !m.folderSet)) return void box?.remove();
+  if (!box) (box = el("div", "row-fold")).id = "pmFolderRow";
+  if (row.parentNode.lastElementChild !== box) row.parentNode.append(box);
   let d = box.querySelector("details.pm-adv");
   if (!d) {
     d = el("details", "prefs-more pm-adv");

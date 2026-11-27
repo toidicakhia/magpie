@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -81,6 +82,12 @@ type RuleHit struct {
 	// doesn't keep the conversation there (affine's "hours"): it goes
 	// where the group routes it, as a new conversation would
 	Ended int `json:"ended,omitempty"`
+	// Stay: the rule the turn's own intent matched, and the member it
+	// names, which the conversation didn't move to (keepsMember): the
+	// vendor's cache of it on Use was warm and that member is no step up
+	// from Use, so the turn stays where a turn before's rule sent it
+	// rather than send the whole conversation to the other uncached
+	Stay *RuleStay `json:"stay,omitempty"`
 	// UseEffort: the reasoning the rule asks the member it names for
 	// (provider.Rule.UseEffort, #2633), in place of the agent's
 	UseEffort string `json:"useEffort,omitempty"`
@@ -89,11 +96,23 @@ type RuleHit struct {
 	members []provider.Member
 }
 
+// RuleStay is the rule a turn's intent matched that the conversation
+// stayed off for its cache (RuleHit.Stay).
+type RuleStay struct {
+	N      int    `json:"n"`      // the rule, from 1
+	Use    string `json:"use"`    // the member it names
+	Tokens int    `json:"tokens"` // how long the conversation cached where it stays is
+}
+
 // Classified is what the classifier was asked as a turn began, and said.
 type Classified struct {
-	By      string   `json:"by"`               // the classifier model
-	Intents []string `json:"intents"`          // what it chose among
-	Intent  string   `json:"intent,omitempty"` // what it said the message is; "" for none
+	By string `json:"by"` // the classifier model: the one that answered, or the last asked
+	// Tried: the group's classifiers asked before By that couldn't say,
+	// in order, each with why (Group.Classifiers): the next is asked when
+	// one fails (qinzhidaoa on X)
+	Tried   []ClassifierTry `json:"tried,omitempty"`
+	Intents []string        `json:"intents"`          // what it chose among
+	Intent  string          `json:"intent,omitempty"` // what it said the message is; "" for none
 	// Said: the answer as it said it — the number a chat model answered
 	// with (0 for none), or the choice a decision model named, its own
 	// "none of these" included — kept when no intent came of it, so
@@ -106,6 +125,10 @@ type Classified struct {
 	Cached bool    `json:"cached,omitempty"` // said before, for the same message
 	Ms     int     `json:"ms,omitempty"`     // how long asking it took
 	Error  string  `json:"error,omitempty"`  // why it couldn't say: no intent matches then, unless Fallback
+	// EffortError: why it couldn't say how hard the turn is, asked apart
+	// from its intent, which still holds: the turn reasons as the agent
+	// asked
+	EffortError string `json:"effortError,omitempty"`
 	// Above: the reasoning a group above this one picked for the turn, so
 	// this one's classifier wasn't asked for it (#4358): the turn reasons
 	// at that, not as the agent asked
@@ -118,6 +141,22 @@ type Classified struct {
 	AfterEffort string `json:"afterEffort,omitempty"`
 }
 
+// ClassifierTry is a classifier asked that couldn't say, and why.
+type ClassifierTry struct {
+	By    string `json:"by"`
+	Error string `json:"error"`
+}
+
+// failsOver reports whether err, a classifier's, has the group ask its
+// next one: it is down, refused, rested or out of time. Not an answer
+// that wasn't a number (answerError): it is up, and its next answer is
+// as likely to be one, so a second paid ask buys nothing; and not an
+// intent said with its effort lost (effortFailed), which holds, nor an
+// effort rated with the intent declined (intentFailed), which holds too.
+func failsOver(err error) bool {
+	return err != nil && !errors.As(err, new(answerError)) && !errors.As(err, new(effortFailed)) && !errors.As(err, new(intentFailed))
+}
+
 type turnRule struct {
 	turn  int
 	use   string // "" when no rule matched
@@ -126,6 +165,12 @@ type turnRule struct {
 	input int // the tokens the vendor counted the conversation's last request as
 	// intent is what the classifier said the turn's first message is
 	intent string
+	// ruleIntent is the intent the turn's rule matched by, where the turn
+	// kept an earlier turn's rule for the cache (keepsMember); "" is intent
+	ruleIntent string
+	// by is the model that answered the conversation last, whose vendor
+	// holds its cache (ruleAnswered)
+	by     answeredBy
 	effort string // the reasoning it picked for the turn
 	wanted string // what it would have picked, kept from (RuleHit.Wanted)
 	// answered is when the vendor last answered the conversation: its
@@ -301,7 +346,7 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 		}
 		if grown, ok := outgrown(g, ctx, hit, q); ok {
 			hit = grown
-			turnRules.m[key] = turnRule{turn: turn, use: hit.Use, n: hit.N, at: now, input: tr.input, intent: q.Intent, effort: tr.effort, wanted: tr.wanted, answered: tr.answered, size: size, hour: tr.hour}
+			turnRules.m[key] = turnRule{turn: turn, use: hit.Use, n: hit.N, at: now, input: tr.input, intent: q.Intent, by: tr.by, effort: tr.effort, wanted: tr.wanted, answered: tr.answered, size: size, hour: tr.hour, cold: tr.cold}
 			return hit
 		}
 		if had {
@@ -335,7 +380,7 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 		if had && slices.Contains(intents, tr.intent) {
 			c.After = tr.intent // a message that only carries on is of its kind
 		}
-		prev := before{Intent: c.After}
+		prev := before{Intent: c.After, Prompt: g.ClassifyPrompt} // the group's own instructions, when it has them
 		if had && effort {
 			prev.Effort = tr.effort // and needs the reasoning it had
 			c.AfterEffort = tr.effort
@@ -345,7 +390,7 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 		// its own (@HirotaNagai on X): from the same parsed, masked request
 		prev.User, prev.Reply = turnBefore(req)
 		switch {
-		case g.Classifier == "":
+		case len(g.Classifiers()) == 0:
 			c.Error = "the group has no classifier"
 		case ask == nil:
 			c.Error = "nothing to ask the classifier with: this is a classifier's own call, or Claude Desktop's connection check"
@@ -353,8 +398,23 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			c.Error = "the message has no words to classify"
 		default:
 			t0 := time.Now()
-			v, cached, err := classify(ask, classifierHeld(g, ms), g.Classifier, intents, prev, effort, text)
-			classifiedFor(g.ID, g.Classifier, err)
+			// each in turn until one says (failsOver)
+			list := g.Classifiers()
+			var v verdict
+			var cached bool
+			var err error
+			for i, cl := range list {
+				if i > 0 {
+					c.Tried = append(c.Tried, ClassifierTry{By: c.By, Error: err.Error()})
+				}
+				prev.Then = len(list) - 1 - i
+				c.By = cl
+				if v, cached, err = classify(ask, classifierHeld(g, ms, cl), cl, intents, prev, effort, text); !failsOver(err) {
+					break
+				}
+			}
+			prev.Then = 0
+			classifiedFor(g.ID, list, err)
 			v.Intent = intentOf(v, g) // the group's own sure of an intent (#5101)
 			c.Intent, c.Said, c.Cached, c.Ms = v.Intent, v.Said, cached, int(time.Since(t0).Milliseconds())
 			if effort {
@@ -363,7 +423,9 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			if len(intents) > 0 {
 				c.Sure = v.Sure
 			}
-			if err != nil {
+			if errors.As(err, new(effortFailed)) {
+				c.EffortError = err.Error()
+			} else if err != nil {
 				c.Error = err.Error()
 				if c.After != "" {
 					// timed out, failed or resting: the intent the turn
@@ -383,6 +445,15 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	if i := provider.MatchRule(g.Rules, q); i >= 0 {
 		hit.N, hit.Use, hit.More, hit.When = i+1, g.Rules[i].Use, g.Rules[i].More, g.Rules[i].Conditions()
 	}
+	ruleIntent := ""
+	if had && keepsMember(g, ms, tr, q, hit, now, size) {
+		// the classifier's answer alone would move a conversation whose
+		// cache is warm where it is, to a member no step up: it stays
+		hit.Stay = &RuleStay{N: hit.N, Use: hit.Use, Tokens: max(tr.input, tr.size)}
+		r := g.Rules[tr.n-1]
+		hit.N, hit.Use, hit.More, hit.When = tr.n, r.Use, r.More, r.Conditions()
+		ruleIntent = cmp.Or(tr.ruleIntent, tr.intent)
+	}
 	if had && hit.Use == "" && tr.use != "" && tr.n >= 1 && tr.n <= len(g.Rules) {
 		if r := g.Rules[tr.n-1]; r.Use == tr.use && r.Time != nil && !r.Time.Holds(now) {
 			hit.Ended = tr.n
@@ -390,11 +461,12 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	}
 	turnRules.Lock()
 	defer turnRules.Unlock()
-	input, answered, hour := tr.input, tr.answered, tr.hour
+	input, answered, hour, cold, by := tr.input, tr.answered, tr.hour, tr.cold, tr.by
 	if cur, ok := turnRules.m[key]; ok {
-		input, answered, hour = cur.input, cur.answered, cur.hour // answered while the classifier was asked
+		// answered while the classifier was asked
+		input, answered, hour, cold, by = cur.input, cur.answered, cur.hour, cur.cold, cur.by
 	}
-	turnRules.m[key] = turnRule{turn: turn, use: hit.Use, n: hit.N, at: now, input: input, intent: q.Intent, effort: hit.Pick, wanted: hit.Wanted, answered: answered, size: size, hour: hour}
+	turnRules.m[key] = turnRule{turn: turn, use: hit.Use, n: hit.N, at: now, input: input, intent: q.Intent, ruleIntent: ruleIntent, by: by, effort: hit.Pick, wanted: hit.Wanted, answered: answered, size: size, hour: hour, cold: cold}
 	if len(turnRules.m) > 4096 {
 		for k, tr := range turnRules.m {
 			if now.Sub(tr.at) > stickKeep {
@@ -469,9 +541,21 @@ func alsoIDs(m provider.Member) []string {
 	return out
 }
 
+// answeredBy is the model a conversation was last answered by: a
+// candidate's model, effort, levels and what rests of it (ofMember).
+type answeredBy struct {
+	model, effort, rest string
+	levels              []string
+}
+
+// of reports whether the answer came from m.
+func (a answeredBy) of(m provider.Member) bool {
+	return a.model != "" && ofMember(candidate{model: a.model, effort: a.effort, levels: a.levels, rest: a.rest}, m)
+}
+
 // ruleAnswered keeps what the vendor counted a conversation's request as,
-// for its next turn's rules to go by.
-func ruleAnswered(key string, u Usage, cold time.Duration) {
+// and who answered it (c), for its next turn's rules to go by.
+func ruleAnswered(key string, u Usage, cold time.Duration, c candidate) {
 	n := u.Input + u.CacheRead + u.CacheWrite
 	if n <= 0 {
 		return
@@ -481,8 +565,74 @@ func ruleAnswered(key string, u Usage, cold time.Duration) {
 	if tr, ok := turnRules.m[key]; ok {
 		now := ruleClock()
 		tr.input, tr.answered, tr.hour, tr.cold = n, now, tr.hour.after(u, now), cold
+		tr.by = answeredBy{model: c.model, effort: c.effort, rest: c.rest, levels: c.levels}
 		turnRules.m[key] = tr
 	}
+}
+
+// cacheWarm is whether the vendor that answered a conversation last still
+// has it cached as a new turn of it begins, tokens long: answered (or
+// asked) within cacheCold, or tr.cold where the vendor keeps it longer,
+// or within the hour it said it keeps it for (tr.hour, #2302); and not
+// compacted since, which leaves it under half as long as its last request.
+func cacheWarm(tr turnRule, tokens int, now time.Time) bool {
+	last := tr.at
+	if tr.answered.After(last) {
+		last = tr.answered
+	}
+	cold := tr.cold
+	if cold <= 0 {
+		cold = cacheCold
+	}
+	if now.Sub(last) > cold && !tr.hour.warm(now) {
+		return false
+	}
+	return tr.size <= 0 || tokens >= tr.size/2
+}
+
+// keepsMember is whether a new turn of a conversation stays on the
+// member its turn before's rule sent it to, rather than the one the rule
+// its own intent matches names (hit). Like the reasoning (keepsEffort),
+// the model is what the vendor caches a conversation under: a turn that
+// moves to another reads the whole history uncached, and a long agent
+// conversation in a smart group moved between its two models each time
+// the classifier said "hard" or "easy" paid for all of it at most turns
+// (chet030714 on X). So while the cache is warm (cacheWarm), the vendor
+// counted it long enough to cache (cacheWorth) and it was that member
+// that answered, a turn the classifier alone takes to be easy, after a
+// hard one, stays (the smart template's intents, IntentHard and
+// IntentEasy): an easy turn is one the strong model does as well, and
+// what it saves on the cheap one is lost reading the history uncached.
+// A hard turn still moves up at once, and an easy one moves down once
+// the cache is lost anyway. Intents a user wrote name kinds of work, not
+// a ladder (coding, a question): each goes where its rule says, as
+// zyh6036 on X asked. Whatever else a rule goes by (images, tokens, the
+// hour, the agent) still moves it, and so does a member too small for the
+// conversation now. Stays "within a turn" or "never" is the user saying a
+// turn starts afresh: it moves then, as before.
+func keepsMember(g provider.Group, ms []provider.Member, tr turnRule, q provider.RuleRequest, hit *RuleHit, now time.Time, tokens int) bool {
+	if hit.Use == "" || tr.use == "" || hit.Use == tr.use || tr.n < 1 || tr.n > len(g.Rules) || g.Rules[tr.n-1].Use != tr.use {
+		return false
+	}
+	if g.Affinity == provider.AffinityTurn || g.Affinity == provider.AffinityOff {
+		return false
+	}
+	if tr.input < cacheWorth || !cacheWarm(tr, tokens, now) {
+		return false
+	}
+	held := membersNamed(tr.use, ms)
+	if !slices.ContainsFunc(held, tr.by.of) {
+		return false // it was answered elsewhere: no cache of it there to keep
+	}
+	// the classifier's answer alone moves it: as the turn before's rule
+	// was matched, it still is
+	was := q
+	was.Intent = cmp.Or(tr.ruleIntent, tr.intent)
+	if was.Intent != provider.IntentHard || q.Intent != provider.IntentEasy || provider.MatchRule(g.Rules, was) != tr.n-1 {
+		return false // not down the smart template's ladder
+	}
+	c := memberContexts(ms)[tr.use]
+	return c <= 0 || c >= q.Tokens
 }
 
 // keepsEffort is whether a new turn of a conversation keeps the reasoning
@@ -506,21 +656,7 @@ func keepsEffort(tr turnRule, pick string, tokens int, now time.Time) bool {
 	if slices.Index(effortRank, pick) > slices.Index(effortRank, tr.effort) {
 		return false // up: the turn wants more than the conversation had
 	}
-	last := tr.at
-	if tr.answered.After(last) {
-		last = tr.answered
-	}
-	cold := tr.cold
-	if cold <= 0 {
-		cold = cacheCold
-	}
-	if now.Sub(last) > cold && !tr.hour.warm(now) {
-		return false
-	}
-	if tr.size > 0 && tokens < tr.size/2 {
-		return false
-	}
-	return true
+	return cacheWarm(tr, tokens, now)
 }
 
 // nestedRules looks at the rules of each group in the group that the one
@@ -960,13 +1096,15 @@ func pausedError(asked string, paused []provider.Paused) string {
 // (AWilsonPeng on X: GPT-6 Luna held to one of two ChatGPT accounts, its
 // classifier its own member GPT-6-Luna · Codex, which asked on both). A
 // group, as the classifier, holds itself to its own when it is asked.
-func classifierHeld(g provider.Group, ms []provider.Member) access.Identity {
+//
+// cl is the classifier asked, one of the group's (Group.Classifiers).
+func classifierHeld(g provider.Group, ms []provider.Member, cl string) access.Identity {
 	name := cmp.Or(g.Name, g.ID)
 	who := access.Identity{}.HeldToGroup(name, g.Accounts)
-	if provider.IsGroupRef(g.Classifier) {
+	if provider.IsGroupRef(cl) {
 		return who
 	}
-	p, model, ok := provider.Resolve(g.Classifier)
+	p, model, ok := provider.Resolve(cl)
 	if !ok {
 		return who
 	}

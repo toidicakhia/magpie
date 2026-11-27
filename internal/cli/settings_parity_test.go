@@ -189,6 +189,11 @@ var cliForRoute = map[string]string{
 	"POST /api/settings/search-count":      "magpie search count",
 	"POST /api/settings/update-mirror":     "magpie update mirror",
 	"POST /api/sync":                       "magpie sync",
+	"GET /api/artifacts":                   "magpie artifacts",
+	"POST /api/artifacts/delete":           "magpie artifacts delete",
+	"POST /api/artifacts/share":            "magpie artifacts share",
+	"POST /api/artifacts/unshare":          "magpie artifacts unshare",
+	"POST /api/artifacts/owner-link":       "magpie artifacts open-shared",
 	"GET /api/davsync":                     "magpie webdav",
 	"POST /api/backup/export":              "magpie backup",
 	"POST /api/backup/import":              "magpie restore",
@@ -234,6 +239,7 @@ var cliForRoute = map[string]string{
 	"GET /api/update":                      "magpie update check",
 	"POST /api/update/check":               "magpie update check",
 	"POST /api/settings/agent-compact":     "magpie model compact",
+	"POST /api/settings/agent-compact-pct": "magpie model compact-pct",
 	"POST /api/settings/agent-contexts":    "magpie model window",
 	"POST /api/settings/agent-suffix":      "magpie model suffix",
 	"POST /api/settings/context-cap":       "magpie model context-cap",
@@ -279,6 +285,7 @@ var notYet = map[string]string{
 	"POST /api/gateway/held/reveal":              W,  // api.go
 	"POST /api/profile/{action}":                 A,  // api.go
 	"POST /api/proxy/check":                      S2, // api.go
+	"POST /api/egress/check":                     P,  // proxycheck.go: the Providers list's Check again, where the Claude accounts' way out is
 	"POST /api/pipelines/check":                  S2, // pipecheck.go: Settings › Models' Quick check, one real call a pipeline
 	"POST /api/relay-check":                      S2, // pipecheck.go: the Usage speed card by provider, its check button: a few small real calls to one model on one provider
 	"POST /api/proxies/save":                     S2, // proxies.go: Settings › Network's saved proxies
@@ -292,6 +299,7 @@ var notYet = map[string]string{
 	"POST /api/settings/bare-ids":                S2, // api.go
 	"POST /api/settings/busy-load":               S2, // api.go
 	"POST /api/settings/checkin-account":         S2, // api.go
+	"GET /api/settings/claude-options/{id}":      S2, // prompt cache and commit trailer for a selected Claude Code instance
 	"POST /api/settings/claude-cache":            S2, // tune.go
 	"POST /api/settings/claude-attribution":      S2, // tune.go
 	"POST /api/settings/codex-agents-v1":         S2, // api.go
@@ -306,6 +314,7 @@ var notYet = map[string]string{
 	"POST /api/settings/codex-open":              S2, // api.go
 	"POST /api/settings/codex-predictions":       S2, // api.go
 	"POST /api/settings/codex-reset-lead":        S2, // api.go
+	"POST /api/settings/codex-reset-days":        S2, // api.go
 	"POST /api/settings/codex-suggestions":       S2, // api.go
 	"POST /api/settings/codex-titles":            S2, // api.go
 	"POST /api/settings/codex-warm-at":           S2, // api.go
@@ -355,6 +364,10 @@ var notYet = map[string]string{
 	"POST /api/settings/archive":                 S2, // archive.go
 	"GET /api/web-page":                          W,  // apppage.go
 	"POST /api/web-page":                         W,  // apppage.go
+	"GET /api/passkeys":                          W,  // passkey.go: a browser's passkeys, made in that browser
+	"POST /api/passkeys/options":                 W,  // passkey.go
+	"POST /api/passkeys/add":                     W,  // passkey.go
+	"POST /api/passkeys/remove":                  W,  // passkey.go
 	"GET /api/plugins/builtin":                   P,  // builtins.go
 	"POST /api/plugins/builtin":                  P,  // builtins.go
 	"GET /api/plugins/counts":                    P,  // plugins_counts.go: Discover's installs and likes
@@ -365,6 +378,8 @@ var notYet = map[string]string{
 	"POST /api/library/browser/drag":             L,  // browser.go
 	"POST /api/library/browser/extension":        L,  // browser.go
 	"GET /api/caller-keys/models":                P,  // caller_keys.go
+	"GET /api/provider-keys":                     P,  // caller_keys.go: a provider's side of the keys' models; `gateway-key models` writes the same list
+	"POST /api/provider-keys":                    P,  // caller_keys.go
 	"GET /api/caller-keys/mcp":                   L,  // caller_keys.go: the servers `magpie gateway-key mcp` takes
 	"POST /api/config/repair":                    A,  // config_repair.go
 	"GET /api/context":                           U,  // context.go
@@ -398,6 +413,8 @@ var notYet = map[string]string{
 	"GET /api/library/market/servers":            L,  // library.go
 	"GET /api/library/market/skills":             L,  // library.go
 	"GET /api/library/market/pi":                 L,  // library.go
+	"GET /api/library/market/claude":             L,  // library.go
+	"GET /api/library/plugin-tags":               L,  // library.go: the newer release tags a pinned plugin is offered; plugins have no update command yet
 	"GET /api/library/mcp-signin/{id}":           L,  // library.go
 	"GET /api/library/pi":                        L,  // library.go
 	"GET /api/library/rtk":                       L,  // library.go
@@ -408,6 +425,7 @@ var notYet = map[string]string{
 	"POST /api/library/market/about":             L,  // library.go
 	"POST /api/library/mcp-account":              L,  // library.go
 	"POST /api/library/mcp-signin":               L,  // library.go
+	"POST /api/library/mcp-signin/{id}/callback": L,  // library.go: the pasted callback URL finishes a sign-in whose loopback the browser can't reach
 	"POST /api/library/mcp-signin/{id}/cancel":   L,  // library.go
 	"POST /api/library/mcp-signout":              L,  // library.go
 	"POST /api/library/mcp/check":                L,  // library.go
@@ -429,6 +447,7 @@ var notYet = map[string]string{
 	"POST /api/library/commands/probe":           L,  // library.go
 	"GET /api/memory":                            L,  // memory.go
 	"POST /api/memory":                           L,  // memory.go
+	"GET /api/memory/stats":                      L,  // memory.go
 	"POST /api/memory/digest":                    L,  // memory.go
 	"POST /api/memory/remove":                    L,  // memory.go
 	"POST /api/memory/status":                    L,  // memory.go
@@ -486,6 +505,7 @@ var notYet = map[string]string{
 	"POST /api/keys/{action}":                    P,  // providers.go
 	"POST /api/login/{action}":                   P,  // providers.go
 	"POST /api/open":                             W,  // providers.go
+	"POST /api/page":                             W,  // providers.go
 	"POST /api/partner":                          P,  // providers.go
 	"POST /api/providers/arrange":                W,  // providers.go
 	"POST /api/signin":                           P,  // providers.go
@@ -500,6 +520,9 @@ var notYet = map[string]string{
 	"POST /api/qianwen/{id}/signin":              P,  // providers.go
 	"POST /api/qianwen/{id}/signin/cancel":       P,  // providers.go
 	"POST /api/qianwen/{id}/signout":             P,  // providers.go
+	"POST /api/mistral/signin":                   P,  // providers.go
+	"GET /api/mistral/signin/{id}":               P,  // providers.go
+	"POST /api/mistral/signin/{id}/cancel":       P,  // providers.go
 	"POST /api/qianfan/{id}/session":             P,  // providers.go
 	"POST /api/qianfan/{id}/signout":             P,  // providers.go
 	"GET /api/speeds":                            U,  // sessions_manage.go: the Sessions row's speed curve
@@ -517,6 +540,7 @@ var notYet = map[string]string{
 	"GET /api/sessions/progress":                 U,  // sessions.go
 	"GET /api/sessions/stats":                    U,  // sessions.go
 	"POST /api/agents/open":                      W,  // sessions.go
+	"POST /api/agents/reveal":                    W,  // sessions.go
 	"POST /api/sessions/carry":                   U,  // sessions.go
 	"POST /api/sessions/export":                  U,  // sessions.go
 	"POST /api/sessions/terminal":                W,  // sessions.go

@@ -447,6 +447,7 @@ func Load(since time.Time) []Record {
 // Known is an agent as its requests name it.
 type Known struct {
 	ID    string
+	Name  string   // as people know it (Claude Code); "" for its id
 	Names []string // its id and aliases, which a record may already carry
 	UA    []string // what its User-Agent begins with
 }
@@ -483,6 +484,18 @@ func knownAgents() []Known {
 // rather than the product name of some other client (Python-urllib).
 func IsAgent(id string) bool {
 	return slices.ContainsFunc(knownAgents(), func(k Known) bool { return k.ID == id || slices.Contains(k.Names, id) })
+}
+
+// AgentName is the name people know the agent id by (Claude Code for
+// claude), its own plugin's for an agent a plugin adds; the id itself for
+// one magpie doesn't know, or knows by no other name.
+func AgentName(id string) string {
+	for _, k := range knownAgents() {
+		if k.ID == id && k.Name != "" {
+			return k.Name
+		}
+	}
+	return id
 }
 
 // libraries are the product names of HTTP libraries, runtimes and API
@@ -532,10 +545,49 @@ func AgentOf(ua string) string {
 			return k.ID
 		}
 	}
+	if libraries[l] {
+		// an SDK's own User-Agent first, the app's after it: DSH's Gemini
+		// route goes out as "google-genai-sdk/2.32.0 gl-node/v25.8.2,
+		// deepseek-harness/0.2.2-rc.5 (+https://…) dsh-profile/headless"
+		if id := agentAfter(ua); id != "" {
+			return id
+		}
+	}
 	if name == "" {
 		return "other"
 	}
 	return name
+}
+
+// agentAfter is the known agent a User-Agent names after its first
+// product, among the products (not the comments) it goes on to list, or "".
+func agentAfter(ua string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range ua {
+		switch {
+		case r == '(':
+			depth++
+		case r == ')' && depth > 0:
+			depth--
+		case depth == 0:
+			b.WriteRune(r)
+		}
+	}
+	words := strings.FieldsFunc(b.String(), func(r rune) bool { return r == ' ' || r == ',' })
+	for _, w := range words[min(1, len(words)):] {
+		name, _, _ := strings.Cut(w, "/")
+		l := strings.ToLower(name)
+		if l == "" || libraries[l] {
+			continue
+		}
+		for _, k := range knownAgents() {
+			if slices.Contains(k.Names, l) || slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
+				return k.ID
+			}
+		}
+	}
+	return ""
 }
 
 // ---- summaries --------------------------------------------------------------
@@ -618,6 +670,10 @@ type Totals struct {
 	FloorOut int   `json:"floor_out,omitempty"`
 	FloorMs  int64 `json:"floor_ms,omitempty"`
 	FloorN   int   `json:"floor_n,omitempty"`
+	// Rates are the DecodeN replies' speeds and the FloorN floors one by
+	// one, what Speed and Floor take the median of; nil for none
+	// (speed_rank.go)
+	Rates *Rates `json:"rates,omitempty"`
 	// UpBytes, DownBytes and ImageFilesSaved are the rows' own summed
 	// (Record.UpBytes …): what went up to the vendors and came back, of
 	// the rows that kept it; none when no row did
@@ -687,21 +743,32 @@ func (t Totals) MeanTTFT() int64 {
 }
 
 // Speed is how fast the timed calls wrote, in tokens a second after their
-// first: 0 for none.
+// first: the median of the replies' own speeds, each as its row tells it
+// (Row.Decode); 0 for none. Not their tokens over their summed time: a
+// few long replies held back by a rate limit or a sleeping computer
+// weighed more than hundreds that streamed (FallMonkey on X: a ranking
+// row read ≥31 tok/s where its rows read ≥80-105).
 func (t Totals) Speed() float64 {
-	if t.DecodeMs <= 0 {
+	switch {
+	case t.DecodeN == 1 && t.DecodeMs > 0: // its own, not its bin's middle
+		return float64(t.DecodeOut) / (float64(t.DecodeMs) / 1000)
+	case t.Rates == nil:
 		return 0
 	}
-	return float64(t.DecodeOut) / (float64(t.DecodeMs) / 1000)
+	return t.Rates.Speed.median()
 }
 
 // Floor is the least the replies whose speed wasn't measured wrote at, in
-// tokens a second (Row.Floor): 0 for none.
+// tokens a second (Row.Floor): the median of the replies' own floors, as
+// Speed is, 0 for none.
 func (t Totals) Floor() float64 {
-	if t.FloorMs <= 0 {
+	switch {
+	case t.FloorN == 1 && t.FloorMs > 0:
+		return float64(t.FloorOut) / (float64(t.FloorMs) / 1000)
+	case t.Rates == nil:
 		return 0
 	}
-	return float64(t.FloorOut) / (float64(t.FloorMs) / 1000)
+	return t.Rates.Floor.median()
 }
 
 // A reply's speed is its output tokens over its decode window, the ms
@@ -878,8 +945,11 @@ func FormatCost(amountUSD float64, currency string, rate float64) string {
 
 // countCache counts r's prompt as one whose cache wasn't counted when its
 // vendor said so, or never counts it (a record kept before it said so).
+//
+// A call with no prompt counted at all (a try that failed before its
+// vendor billed it) leaves nothing out, and is not counted.
 func (t *Totals) countCache(r Record) {
-	if r.cacheNotCounted() {
+	if r.cacheNotCounted() && r.cacheUnknownIn() > 0 {
 		t.CacheUnknown += r.cacheUnknownIn()
 		t.CacheUnknownCalls++
 	}
@@ -961,6 +1031,7 @@ func (t *Totals) addFrom(row Row, price *catalog.Price) {
 			t.DecodeMs += w
 			t.DecodeOut += n
 			t.DecodeN++
+			t.Rates = t.Rates.withSpeed(n, w)
 		}
 	}
 	if r.Input+r.Output == 0 {
@@ -1002,6 +1073,14 @@ func (t *Totals) count(r Record) {
 	case r.Tries > 1:
 		t.Retried++
 	}
+}
+
+// TriedOnly is whether r is a try that failed and handed its request on
+// with nothing billed: a row of its own on the Requests page, with its
+// status and the vendor's words (Dazzle_sys on X), but no call, no model
+// a session went through and nothing spent.
+func (r Record) TriedOnly() bool {
+	return r.HandedOn && r.Input+r.Output+r.CacheRead+r.CacheWrite == 0
 }
 
 // LostRequest is whether r ends a request the agent got an error for: a
@@ -1229,6 +1308,9 @@ type viaAcc struct {
 func countVias(blocks []*rowChunk, since time.Time, renames provider.Renames, base, own map[string]viaAcc, keep keptStrings) {
 	visitBlocks(blocks, since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" || r.Model == "" {
+			return
+		}
+		if r.TriedOnly() {
 			return
 		}
 		r.Provider, r.Model, r.Effort = keep.of(renames.Of(r.Provider, r.Time)), keep.of(r.Model), keep.of(r.Effort)

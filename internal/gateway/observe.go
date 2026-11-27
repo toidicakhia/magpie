@@ -34,7 +34,7 @@ func observeRequest(r *http.Request, kind string, body []byte) (*http.Request, *
 	// the agent it is recorded as, another magpie's own (callerFrom)
 	agent := callerOf(r).agent
 	who := access.Caller(r.Context())
-	q := usage.Request{Header: r.Header, Agent: agent, Session: observedSession(r.Header), Kind: observedKind(agent, kind, body),
+	q := usage.Request{Header: r.Header, Agent: agent, Session: observedSession(r.Header), Kind: observedKind(claudeCodeAs(r, agent), kind, body),
 		Plain: local(r) && who.KeyID == "" && callerOf(r).via == ""}
 	o := &observed{keyName: who.KeyName}
 	for _, ob := range observers {
@@ -56,6 +56,15 @@ func observedSession(h http.Header) string {
 	return sessionOf(h)
 }
 
+// claudeCodeAs is agent, or "claude" for Claude Code an app runs under its
+// own key (claudeCodeInside).
+func claudeCodeAs(r *http.Request, agent string) string {
+	if claudeCodeInside(r, agent) {
+		return "claude"
+	}
+	return agent
+}
+
 // Claude's tool-less small tasks (titles, suggestions, haiku helpers) may
 // reuse the parent session but aren't recorded in its transcript. Keep their
 // gateway spans; a model name alone doesn't identify a helper or a subagent.
@@ -70,8 +79,11 @@ func observedKind(agent, kind string, body []byte) string {
 // nowhere in the request: its auto mode classifier and its AgentSummary,
 // told by their content. They are recorded as inferred
 // (usage.InferredSuffix), never as the client's word; "" for any other.
-func inferredKind(in http.Header, from provider.Protocol, body []byte) string {
-	if !fromClaudeCode(in) || from != provider.Anthropic {
+// Claude Code's is told as claudeCodeAsks tells it, so one another magpie
+// passed on is told too: a Remote magpie recorded its helpers unmarked
+// (recih, #7852).
+func inferredKind(r *http.Request, from provider.Protocol, body []byte) string {
+	if from != provider.Anthropic || !claudeCodeAsks(r) {
 		return ""
 	}
 	switch {

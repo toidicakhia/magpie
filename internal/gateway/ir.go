@@ -53,6 +53,12 @@ type Part struct {
 	Name string
 	Args json.RawMessage // a JSON object
 
+	// opens is on the first part of a user message of its own that
+	// mergeTurns joined after tool results (a Responses client's next
+	// message after a turn's function_call_output items), so turnIn reads
+	// it as the message it was
+	opens bool
+
 	// tool_result
 	CallID     string
 	IsError    bool
@@ -439,16 +445,15 @@ type Request struct {
 	// and the conversation sent before stay as they were, so its prompt
 	// cache does (#2660). Every other upstream gets them in tools.
 	LoadedInPlace bool
-	// DeferredNamed is set on a Claude Code request carrying its
-	// DeferredToolPlaceholder: its deferred tools are named in a
-	// reminder and declared only once ToolSearch loads them
-	// (deferred_route.go).
-	DeferredNamed bool
 	// CR is set when the model asked is one of the glm-5.3-flash* routes
 	// whose replicas stitch CR into a call's arguments (#4256): the
 	// arguments reach the client with the stitched CR dropped
 	// (tool_args_cr.go).
 	CR bool
+	// Free is, for a Gemini model, where each tool's objects of any
+	// fields are, by the tool's name: sent to it as JSON text, they
+	// reach the client read back (gemini_free_objects.go, #7363).
+	Free map[string][][]string
 }
 
 // nsTool is a tool as a Responses client knows it: by its namespace and its
@@ -526,6 +531,10 @@ type Event struct {
 	// Wait: for KError, how long the vendor said to wait before asking
 	// again, when it said; sent on as Retry-After
 	Wait time.Duration
+	// Resets: for KError, when the limit that refused the request renews,
+	// as Anthropic told Claude Code (its rate_limit_event's resetsAt);
+	// the account rests till then (resetsHeader)
+	Resets time.Time
 	// Said: for KError, the vendor's own error as {"error":{…}}, when it
 	// said the request itself is at fault; its code and param go to a
 	// client answered whole (writeVendorError)
@@ -654,6 +663,35 @@ func (u Usage) prompt() int {
 	return u.Input + u.CacheRead + u.CacheWrite
 }
 
+// promptCount is a stream's prompt as one count, for a wire whose prompt
+// count takes in what was read from the cache and written to it (Chat's
+// prompt_tokens, Gemini's promptTokenCount), when its chunks count it
+// more than once. A chunk naming the prompt but not its cache, after one
+// that named both, left Input the whole prompt beside the cache read
+// still held from before: the whole reply's usage (Usage.add keeps each
+// field's last non-zero) told the cache twice, and a Responses client's
+// input_tokens was the prompt and the cache together, its hit rate under
+// half (cyberestro on X). So the prompt, the cache read and the cache
+// write are each the last the reply named, and Input is what they leave.
+type promptCount struct{ prompt, read, write int }
+
+// fit is u, a chunk's usage whose whole prompt is prompt (0 if the chunk
+// didn't count it), with its prompt counts as the reply's so far.
+func (p *promptCount) fit(u Usage, prompt int) Usage {
+	if prompt > 0 {
+		p.prompt = prompt
+	}
+	if u.CacheRead > 0 {
+		p.read = u.CacheRead
+	}
+	if u.CacheWrite > 0 {
+		p.write = u.CacheWrite
+	}
+	u.Input = max(p.prompt-p.read-p.write, 0)
+	u.CacheRead, u.CacheWrite = p.read, p.write
+	return u
+}
+
 func (u *Usage) add(v Usage) {
 	if v.restart {
 		u.Input, u.CacheRead, u.CacheWrite, u.CacheWrite1h = v.Input, v.CacheRead, v.CacheWrite, v.CacheWrite1h
@@ -741,6 +779,7 @@ type collector struct {
 	errStatus int
 	errCode   string
 	errSaid   json.RawMessage
+	errResets time.Time
 }
 
 func (c *collector) last(k Kind) *Part {
@@ -863,7 +902,7 @@ func (c *collector) add(ev Event) {
 			c.res.Model = ev.Model // another model went on with the reply
 		}
 	case KError:
-		c.err, c.errStatus, c.errCode, c.errSaid = ev.Text, ev.Status, ev.Code, ev.Said
+		c.err, c.errStatus, c.errCode, c.errSaid, c.errResets = ev.Text, ev.Status, ev.Code, ev.Said, ev.Resets
 	case KSearch:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Search, Text: ev.Text, Hits: ev.Hits})

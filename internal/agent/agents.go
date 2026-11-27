@@ -33,7 +33,7 @@ func init() {
 	usage.Agents = func() []usage.Known {
 		var out []usage.Known
 		for _, a := range Clients() {
-			out = append(out, usage.Known{ID: a.ID, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
+			out = append(out, usage.Known{ID: a.ID, Name: a.Name, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
 		}
 		return out
 	}
@@ -224,6 +224,11 @@ var others = []*Agent{
 	// Sessions lists those as Raft's (internal/sessions/raft.go), while
 	// their requests say "pi (…)" and are Pi's
 	{ID: "raft", Name: "Raft", Icon: "generic"},
+	// CatPaw (Meituan's CatPaw IDE) runs its agent on its own models;
+	// Sessions lists its conversations (internal/sessions/catpaw.go). Its
+	// icon is the app's own, CatPawAI.icns of catpawai.dmg, cut to its tile
+	// (KenyonCode on X)
+	{ID: "catpaw", Name: "CatPaw", Icon: "catpaw"},
 	// Magpie Memory reading conversations into memories: its requests are
 	// made as memdistill.Agent, by its token and never a User-Agent, and
 	// drawn with the brain the Library's Memory tab has (the owner, 11-12)
@@ -381,6 +386,7 @@ func onMachineAll(home, cfg string) []*Agent {
 		qoder(home),
 		qoderCN(home),
 		grok(home),
+		kigi(home),
 		grokApp(home),
 		zcode(home),
 		workbuddy(home),
@@ -452,6 +458,7 @@ func openCodeSpelled(path string, v1 func() string) func(string) bool {
 		if prefixed(v) {
 			return true
 		}
+		v, _ = openCodeCut(v)
 		p, ref, ok := strings.Cut(v, "/")
 		if !ok || p == "" {
 			return false
@@ -977,6 +984,11 @@ func piModelOn(m catalog.Model, gw string, native bool, on string) map[string]an
 			e["compat"] = map[string]any{"forceAdaptiveThinking": true}
 		}
 	case !native:
+	case slices.Contains(m.APIs, string(provider.Gemini)):
+		// first, as a Gemini model a relay also serves on Messages is
+		// listed there too (provider.AgentGemini); Pi's own folder has
+		// it taken out (piAsked)
+		e["api"], e["baseUrl"] = "google-generative-ai", gw+"/v1beta"
 	case slices.Contains(m.APIs, string(provider.Responses)):
 		// strict left out of a tool of a turn asked there is taken as a
 		// strict-mode schema, every property required, optional ones
@@ -989,8 +1001,6 @@ func piModelOn(m catalog.Model, gw string, native bool, on string) map[string]an
 		if gateway.AsksAdaptively(m.ID) {
 			e["compat"] = map[string]any{"forceAdaptiveThinking": true}
 		}
-	case slices.Contains(m.APIs, string(provider.Gemini)):
-		e["api"], e["baseUrl"] = "google-generative-ai", gw+"/v1beta"
 	}
 	if m.Images {
 		e["input"] = []string{"text", "image"}
@@ -1309,6 +1319,27 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 			return put(v)
 		}
 	}
+	// the model's default variant (opencode_effort.go), OpenCode's own
+	// alone: MiMo Code's and DevEco Code's reading of one isn't known
+	effort := ocEffort{path: path, file: file, offered: func(m string) []string {
+		return openCodeOffered(id, path, at.v1(), m, false)
+	}}
+	fields := []Field{
+		{Key: "model", Label: "model", Get: effort.model, Set: set("model"), Options: opts("model")},
+		{Key: "small", Label: "small", Get: func() string { return file().small() }, Set: set("small_model"), Options: opts("small")},
+	}
+	if id == "opencode" {
+		model := set("model")
+		fields[0].Set = func(v string) error { return effort.moved(v, model) }
+		fields = append(fields, Field{
+			Key: "effort", Label: "effort", Get: effort.get, Set: effort.set,
+			// the variants OpenCode has for one of magpie's models, its
+			// levels: none for any other, whose variants are OpenCode's
+			Options: func(cur map[string]string) []Option {
+				return static(openCodeOffered(id, path, at.v1(), cur["model"], true)...)
+			},
+		})
+	}
 	return &Agent{
 		ID: id, Name: name, Icon: icon, Aliases: aliases, Spelled: openCodeSpelled(path, at.v1),
 		UA:  ua,
@@ -1325,10 +1356,7 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 			// file: put it back, or the agent has nothing to send it to
 			return file().sync(onMagpie())
 		},
-		Fields: []Field{
-			{Key: "model", Label: "model", Get: jsonGet(path, "model"), Set: set("model"), Options: opts("model")},
-			{Key: "small", Label: "small", Get: func() string { return file().small() }, Set: set("small_model"), Options: opts("small")},
-		},
+		Fields: fields,
 	}
 }
 
@@ -1355,13 +1383,17 @@ func openCodeRef(path, id, v string) (string, error) {
 // openCodeRefAt is openCodeRef for the agent at a place, which reaches the
 // gateway at its own address.
 func openCodeRefAt(at place, path, id, v string) (string, error) {
+	// OpenCode 2's default variant after the model (opencode_effort.go)
+	// stays with it
+	v, variant := openCodeCut(v)
 	ref, ok := strings.CutPrefix(v, magpieID+"/")
 	if !ok || !isMagpie(ref) {
-		return v, nil
+		return openCodeJoin(v, variant), nil
 	}
 	if own := ownGatewayProvider(path, ref, at.v1()); own != "" {
-		return own + "/" + ref, nil
+		return openCodeJoin(own+"/"+ref, variant), nil
 	}
+	v = openCodeJoin(v, variant)
 	block := func() any { return magpieProviderJSONAt("opencode", id, at.gw()) }
 	return v, openCodeFileAt(at, path, id, block).sync(true)
 }
@@ -1511,6 +1543,12 @@ func pi(home string) *Agent { return piIn(here(home)) }
 func piIn(at place) *Agent {
 	a := piLike(at, "pi", "Pi", piDir(at))
 	a.UA = []string{"pi-"}
+	// Cindy's Pi reads Pi's instructions here, the first of these there is
+	// (readPiGlobalContext in Cindy's maker-core), and the Library writes
+	// AGENTS.md for Cindy with no Pi here: a folder holding only them is
+	// Cindy's, while Pi's own run leaves settings.json, auth.json or
+	// sessions beside them (T_t__biu on X, #7872)
+	a.readHere = []string{"AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"}
 	return a
 }
 
@@ -1526,6 +1564,10 @@ func piDir(at place) string {
 	}
 	return at.join(".pi", "agent")
 }
+
+// PiDir is Pi's agent folder on this machine under home, as piDir finds
+// it: PI_CODING_AGENT_DIR's when set, else ~/.pi/agent.
+func PiDir(home string) string { return piDir(here(home)) }
 
 // homeDir is the folder an agent's variable names, "~" and "~/…" expanded
 // to home as Pi does; "" when it is empty or relative.

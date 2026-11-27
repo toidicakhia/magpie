@@ -85,6 +85,34 @@ export const FakePlugin = async ({ client }) => ({
         "fake-gemini": { name: "Fake Gemini", provider: { npm: "@ai-sdk/google" }, reasoning: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 3000, output: 300 } },
       },
     }
+    // $FAKE_SPLIT: a provider declared as WorkBuddy's plugin declares it,
+    // its chat at <root>/v2 and its Claude model on Messages at <root>/v1,
+    // the loader giving no base (each model's own URL says where it goes)
+    if (process.env.FAKE_SPLIT) {
+      const root = String(process.env.FAKE_BASE).replace(/\/v1$/, "")
+      cfg.provider[ID].api = root + "/v2"
+      cfg.provider[ID].models["fake-claude"].provider.api = root + "/v1"
+    }
+    // $FAKE_AGY: the provider as agy-cli 0.1.141 and later declares it
+    // (#7889): its package Anthropic's, its models on Messages, beside one
+    // image model on openai-compatible (gemini-3.1-flash-image), which
+    // gives the provider a chat address too
+    if (process.env.FAKE_AGY) {
+      const p = cfg.provider[ID]
+      p.npm = "@ai-sdk/anthropic"
+      p.models = {
+        "fake-hydrogen": { name: "Fake Hydrogen", provider: { npm: "@ai-sdk/anthropic" }, reasoning: true, limit: { context: 2000, output: 200 } },
+        "fake-image": { name: "Fake Image", provider: { npm: "@ai-sdk/openai-compatible" }, modalities: { input: ["text", "image"], output: ["image"] }, limit: { context: 0, output: 0 } },
+      }
+      if (process.env.FAKE_AGY === "google") {
+        p.npm = "@ai-sdk/google"
+        p.models["fake-hydrogen"].provider.npm = "@ai-sdk/google"
+      }
+      if (process.env.FAKE_AGY === "openai") {
+        p.npm = "@ai-sdk/openai"
+        p.models["fake-hydrogen"].provider.npm = "@ai-sdk/openai"
+      }
+    }
     // $FAKE_KIRO: a Claude model named as Kiro's plugin names it, on
     // Anthropic's Messages API
     if (process.env.FAKE_KIRO) cfg.provider[ID].models["claude-opus-5.5"] = { name: "Claude Opus 5.5", provider: { npm: "@ai-sdk/anthropic" }, reasoning: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 200000, output: 32000 } }
@@ -92,7 +120,7 @@ export const FakePlugin = async ({ client }) => ({
     // $FAKE_FAST=1: fake-1 has a fast one, as Cursor's plugin 0.1.x lists
     // a model's -fast (=tier: see the models hook)
     if (process.env.FAKE_FAST === "1") cfg.provider[ID].models["fake-1-fast"] = { name: "Fake One Fast", limit: { context: 1000, output: 100 } }
-    if (process.env.FAKE_RESPONSES) cfg.provider[ID].models["fake-resp"] = { name: "Fake Responses", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
+    if (process.env.FAKE_RESPONSES && !process.env.FAKE_AGY) cfg.provider[ID].models["fake-resp"] = { name: "Fake Responses", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
     // $FAKE_ALSO: a model on chat completions whose vendor serves it on
     // Responses and Anthropic's messages too, as Open Design's amr-link
     // serves every model (plugins#888)
@@ -244,7 +272,7 @@ export const FakePlugin = async ({ client }) => ({
       if (process.env.FAKE_LOAD_WAIT) await new Promise((r) => setTimeout(r, Number(process.env.FAKE_LOAD_WAIT)))
       return {
       apiKey: "dummy",
-      baseURL: process.env.FAKE_BASE,
+      baseURL: process.env.FAKE_SPLIT ? "" : process.env.FAKE_BASE,
       async fetch(url, init) {
         let a = await getAuth()
         // "r-revoked": the vendor turned the refresh away, said as Zed's says it
@@ -264,7 +292,7 @@ export const FakePlugin = async ({ client }) => ({
         // where magpie said the agent works, as the plugin read it; its own
         // headers go on too, as a plugin that sends on what it got sends
         // them, for the host to take off
-        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort", "x-magpie-caller-agent", "x-magpie-caller-name", "x-magpie-caller-via"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
         // $FAKE_QUEUE: that model is queued at the vendor, as Qoder's free
         // models are: waited out (here until magpie gives up) unless magpie
         // said it needn't be, then said at once with the queue's 503
@@ -275,6 +303,23 @@ export const FakePlugin = async ({ client }) => ({
           await new Promise((_, no) => {
             const t = setTimeout(() => no(new Error("FakeCo's queue gave up")), 300e3)
             init.signal?.addEventListener("abort", () => (clearTimeout(t), no(init.signal.reason)))
+          })
+        }
+        // $FAKE_PIN_OFF ("<provider>/<model>"): the plugin sends the request
+        // on through magpie's gateway at $MAGPIE_ADDR, pinned to that
+        // provider's account or key turned off, as a plugin testing an
+        // account before it is turned on does (tmr11235 on X)
+        if (process.env.FAKE_PIN_OFF) {
+          const [pid] = process.env.FAKE_PIN_OFF.split("/")
+          const base = "http://" + process.env.MAGPIE_ADDR
+          const { data } = await (await fetch(base + "/v1/magpie/accounts?provider=" + pid)).json()
+          const off = data.find((a) => !a.on)
+          if (!off) return new Response(JSON.stringify({ error: { message: "FakeCo: none of " + pid + " is off" } }), { status: 404, headers: { "content-type": "application/json" } })
+          return fetch(base + "/v1/chat/completions", {
+            method: "POST",
+            signal: init.signal,
+            headers: { authorization: "Bearer magpie", "content-type": "application/json", "x-magpie-account": encodeURIComponent(off.pin) },
+            body: JSON.stringify({ ...JSON.parse(init.body), model: process.env.FAKE_PIN_OFF }),
           })
         }
         // $FAKE_H2: the request goes on node:http2 to that origin, as
@@ -316,6 +361,9 @@ export const FakePlugin = async ({ client }) => ({
       if (process.env.FAKE_WINDOWS) {
         const fs = await import("node:fs")
         const ws = JSON.parse(fs.readFileSync(process.env.FAKE_WINDOWS, "utf8"))[a.accountId]
+        // a string: why no reading was made this time, as agy-cli says
+        // it (its sign-in due to be renewed, agy still reading)
+        if (typeof ws === "string") return { windows: [], error: ws, signIn: "kept" }
         if (ws) return { plan: "Fake Pro", windows: ws, user: iam }
       }
       const full = a.accountId === "full@fake"
@@ -402,6 +450,7 @@ export const FakePlugin = async ({ client }) => ({
       // $FAKE_MODELS_LOG: each time the hook is asked is a line there
       if (process.env.FAKE_MODELS_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_MODELS_LOG, "asked " + (auth?.refresh ?? auth?.key ?? "-") + "\n")
       if (auth?.refresh === "r-dead" || auth?.key === "dead") throw new Error("the vendor refused the sign-in")
+      if (process.env.FAKE_AGY) return p.models
       if (auth?.refresh === "r-models-gone") throw Object.assign(new Error("the vendor refused the sign-in"), { signIn: "expired" })
       // a sign-in past its time, said in words only, as Grok's plugin says it
       if (auth?.refresh === "r-models-expired") throw new Error("FakeCo's sign-in has expired; run `fake login`")
@@ -495,5 +544,8 @@ export const FakePlugin = async ({ client }) => ({
   },
   "chat.headers": async (input, output) => {
     if (input.model.providerID === ID) output.headers["x-plugin-model"] = input.model.id
+    // who asked, as magpie told the hook (input.caller), beside OpenCode's
+    // own agent
+    if (input.caller) output.headers["x-saw-hook-caller"] = encodeURIComponent(JSON.stringify({ agent: input.agent, caller: input.caller }))
   },
 })

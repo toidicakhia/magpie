@@ -24,8 +24,27 @@ import (
 const (
 	agyCLIID      = "agy-cli"
 	agyCLIPackage = "@magpie-community/opencode-agy-cli-auth"
+	// 0.1.145: a Claude Code conversation keeps its agy session when a
+	// Bash cd moves its working folder or ToolSearch loads a tool mid-turn,
+	// instead of replaying it into a new one (_paper_hands on X), and
+	// AGY_BRIDGE_STRICT_REPLAY refuses a replay that would leave history
+	// out (NullBurn, plugins#1495); 0.1.143: a Claude Code model switch,
+	// which rewrites the system prompt's model line, keeps the agy session
+	// instead of replaying the
+	// conversation into a new one (chet030714 on X); 0.1.142: a tool loop
+	// cut by a plugin host restart resumes its agy session with only the
+	// step's results (chet030714, xuanbo1889245 on X);
+	// 0.1.140: usage is read through agy alone (`agy -p /usage`), never
+	// with agy's stored token against Google's quota endpoints, and a
+	// slow read says agy is still reading instead of "timed out"
+	// (9uK7K2AqpF10987, Jayc1world on X); 0.1.139: a replay over agy's
+	// 128 KiB prompt cap goes in whole over
+	// several prompts instead of being cut to the newest turns
+	// (yayoi_no_yume on X); 0.1.133: each account moved gets an agy home
+	// of its own, and a request of one never goes on in another's agy, so
+	// one account's 429 no longer rests the other (Archivemylife on X);
 	// 0.1.68: auth.import takes the old plugin's sign-ins
-	agyCLIMin = "0.1.68"
+	agyCLIMin = "0.1.145"
 )
 
 // agyMoving are the Antigravity accounts agy-cli doesn't have yet, as the
@@ -106,6 +125,30 @@ func AgyMoveUsers() []string {
 		out = append(out, agyWho(a))
 	}
 	return out
+}
+
+// AgyHasEvery reports whether Antigravity (local agy CLI) is signed in
+// and has every account of the withdrawn Antigravity plugin, by email:
+// then nothing is left to move, and the old plugin only sends requests
+// agy-cli could. An old account with no email can't be matched, so it
+// counts as not there. Account discovery being off changes nothing here:
+// these are the user's own sign-ins.
+func AgyHasEvery() bool {
+	have := map[string]bool{}
+	for _, a := range plugin.Auths(agyCLIID) {
+		if who := agyWho(a); who != "" {
+			have[who] = true
+		}
+	}
+	if len(have) == 0 {
+		return false
+	}
+	for _, a := range plugin.Auths("antigravity") {
+		if a["type"] == "oauth" && !have[agyWho(a)] {
+			return false
+		}
+	}
+	return true
 }
 
 // MoveToAgy brings Antigravity's accounts into agy-cli: the plugin

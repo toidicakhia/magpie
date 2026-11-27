@@ -160,7 +160,7 @@
     <h2 id="share"><a class="anchor" href="#share">1. メインの magpie を共有する</a></h2>
     <ol class="steps">
       <li><b>共有をオンにする</b>プロバイダを保存しているコンピューターで <span class="ui">設定</span> → <span class="ui">ネットワークと共有</span> → <span class="ui">ローカルネットワークで共有</span> → <span class="ui">オン</span>。magpie はローカルネットワークで待ち受け、<span class="ui">Magpie</span> という名前のゲートウェイキーを作ります。スイッチの下の <span class="ui">アドレス</span> の行に、ほかのコンピューターから届くアドレス（例：<code>http://192.168.1.20:3425</code>）が表示されます。</li>
-      <li><b>コンピューターごとにキーを作る</b><span class="ui">ゲートウェイ</span> → <span class="ui">ゲートウェイキー</span>、または <code>magpie gateway-key add "Laptop"</code>。<code>sk-magpie-key-…</code> が表示されます。キーごとに日・週・月の上限と使えるモデルを決められ、呼び出しはその名前で集計されます。</li>
+      <li><b>コンピューターごとにキーを作る</b><span class="ui">ゲートウェイ</span> → <span class="ui">ゲートウェイキー</span>、または <code>magpie gateway-key add "Laptop"</code>。<code>sk-magpie-key-…</code> が表示されます。キーごとに日・週・月の上限と使えるモデルを決められ、呼び出しはその名前で集計されます。MCP ゲートウェイ用のキーには<b>モデルなし</b>（<code>magpie gateway-key models &lt;id&gt; none</code>）を選べます。MCP サーバーだけを使え、モデルは使えません。</li>
     </ol>
     <p>共有がオフの間、デスクトップの magpie は自分のコンピューターでしか待ち受けず、ほかのコンピューターからは届きません。Docker の magpie は公開したポートから届き、共有のオン・オフにかかわらず、コンテナの外からの呼び出しすべてにゲートウェイキーを求めます。<a href="/docs/ja/docker#share">Docker</a> を参照してください。</p>
 
@@ -270,6 +270,7 @@ curl -s -X POST http://127.0.0.1:3425/v1/magpie/admin/gateway-keys/add-key \
 magpie gateway-key memory &lt;id&gt; on</pre>
     </div>
     <p>magpie を共有している間、そのエージェントは <code>http://&lt;このコンピュータ&gt;:3425/mcp/magpie/memory</code> を <code>Authorization: Bearer &lt;キー&gt;</code> 付きで使うか、MCP ルーターで <code>magpie-memory</code> を見つけます。保存した内容はここのすべてのエージェントの指示に入るため、ほかのキーには渡しません。共有キー、読み取り専用・発行された・短期のキー、キーの有無にかかわらず Web ページも使えません。</p>
+    <p>MCP ルーターを通したライブラリのほかの MCP サーバーについて：モデル、アカウント、利用額の制限があるキーには、共有しているコンピュータでプログラムとして動くサーバーは渡されません。<a href="/docs/ja/mcp-router#away">別のコンピュータから</a> を参照してください。</p>
 
     <h2 id="api"><a class="anchor" href="#api">統計 API</a></h2>
     <p>使用量ページの内容は JSON でも、このコンピューターに、また magpie を共有している間はゲートウェイキー付きのリクエストに提供されます。予算、モデル、アカウントで制限されたキーには、自分のリクエストと上限だけが返ります。持ち主がそのキーの<span class="ui">残量</span>をオンにすると（<code>magpie gateway-key quotas &lt;id&gt; on</code>）、使えるもののクォータも返ります。</p>

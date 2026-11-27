@@ -17,7 +17,8 @@
 //                          Both take ?lang=zh for the notes in Chinese, where a
 //                          release has them (below its <!-- lang:zh --> marker);
 //                          any other lang, or none, is the English alone.
-//   /api/partners          {partners: [...]}: the add sheet's Partners (partners.js),
+//   /api/partners          {partners: [...]}: the add sheet's and the Plugins
+//                          page's Partners (partners.js),
 //                          their website and key links through /go
 //   /go/<id>/keys[/<region>], /go/<id>/site[/<region>]
 //                          a partner's key page or website, counted
@@ -50,10 +51,20 @@
 //                          (relay, below) so a blocker that knows its host
 //                          doesn't drop the count
 //   /docs, /docs/zh, /docs/ja  the getting-started guide: /docs/start, /docs/<lang>/start
-//   /zh/, /ja/, /de/       the home page in Chinese, Japanese, German (i18n.js);
+//   /zh/, /zh-tw/, /ja/, /de/  the home page in Chinese (Simplified and
+//                          Traditional), Japanese, German (i18n.js);
 //                          / sends a browser that prefers one of them there,
 //                          until a language is picked on the page (the lang
-//                          cookie). /de/ has no docs: its links go to English.
+//                          cookie). /zh-tw/'s docs links go to the Chinese
+//                          docs, /de/'s to English.
+//   /a/<id>, /api/shares, /api/shares/<id>
+//                          shared artifacts: a page a magpie user shared,
+//                          and sharing, updating and taking one down
+//                          (shares.js); a.usemagpie.ai serves their files
+//   /g/<id>, /groups, /api/groups, /api/groups/<id>, /api/groups/report,
+//   /api/groups/like       shared routing groups: a group's page and the
+//                          gallery, and sharing, listing, counting and
+//                          liking them (groups.js)
 //
 // Everything else is the static site in public/.
 
@@ -62,6 +73,12 @@ import { PARTNERS } from "./partners.js";
 import { SPONSORS } from "./sponsors.js";
 import { serve as serveFile, held, onR2, mirror, githubFile } from "./files.js";
 import { handle as pluginStats, prune as prunePlugins } from "./pluginstats.js";
+import { api as shareAPI, page as sharePage, content as shareContent, prune as pruneShares, CONTENT as SHARE_HOST } from "./shares.js";
+import { api as groupAPI, page as groupPage, prune as pruneGroups } from "./groups.js";
+import { api as liveAPI, ShareLive } from "./live.js";
+
+// each shared page's data and room (live.js)
+export { ShareLive };
 
 const REPO = "yetone/magpie-releases";
 const SITE = "https://usemagpie.ai";
@@ -90,9 +107,28 @@ const DOC_LANGS = ["zh", "ja"];
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    // shared artifacts' own host serves their files and nothing else
+    if (url.hostname === SHARE_HOST) return shareContent(req, env);
     if (url.hostname.startsWith("www.")) {
       url.hostname = url.hostname.slice(4);
       return Response.redirect(url.toString(), 301);
+    }
+    if (url.pathname.startsWith("/api/visitors") || url.pathname.startsWith("/api/shares/")) {
+      const got = await liveAPI(req, env, ctx);
+      if (got) return got;
+    }
+    // a path neither knows (a malformed id, an unknown call) is a 404,
+    // not a Worker exception
+    if (url.pathname === "/api/shares" || url.pathname.startsWith("/api/shares/"))
+      return (await shareAPI(req, env, ctx)) || Response.json({ error: "no such call" }, { status: 404 });
+    if (url.pathname.startsWith("/a/")) {
+      const got = await sharePage(req, env);
+      if (got) return got;
+    }
+    if (url.pathname === "/api/groups" || url.pathname.startsWith("/api/groups/")) return groupAPI(req, env, ctx);
+    if (url.pathname.startsWith("/g/") || url.pathname === "/groups" || url.pathname === "/groups/") {
+      const got = await groupPage(req, env);
+      if (got) return got;
     }
     if (url.pathname === "/api/plugins/tagged") return taggedPlugins(ctx);
     if (url.pathname === "/api/plugins/readme") return pluginReadme(ctx, url.searchParams.get("name"));
@@ -124,7 +160,7 @@ export default {
       let id, what, region, to, counted;
       try {
         [, , id, what, region] = url.pathname.split("/").map(decodeURIComponent);
-        if ((to = goTarget(PARTNERS, id, what, region))) counted = ["magpie partner go", { id, what, region: region || "" }];
+        if ((to = goTarget(PARTNERS, id, what, region))) counted = ["magpie partner go", { id, what, region: region || "", slot: PARTNERS.find((p) => p.id === id).plugin ? "plugins" : "providers" }];
         else if (region === undefined && (to = sponsorTarget(SPONSORS, id, what))) counted = ["magpie sponsor go", { id, where: what }];
       } catch {}
       if (!to) return new Response("not found\n", { status: 404 });
@@ -179,7 +215,7 @@ export default {
     // does, until a language is picked
     const doc = url.pathname.match(/^\/docs\/([a-z-]+)(\.html)?$/);
     if (doc && !DOC_LANGS.includes(doc[1]) && (req.method === "GET" || req.method === "HEAD")) {
-      const lang = preferred(req);
+      const lang = LANGS[preferred(req)]?.docs;
       const vary = { Vary: "Accept-Language, Cookie", "Cache-Control": "no-cache" };
       const there = `/docs/${lang}/${doc[1]}`;
       // a page not written in that language yet stays English
@@ -191,13 +227,14 @@ export default {
       out.headers.set("Cache-Control", "no-cache");
       return out;
     }
-    const home = url.pathname.match(/^\/([a-z]{2})(\/(index\.html)?)?$/);
-    if (home && LANGS[home[1]]) {
-      if (!home[2]) return Response.redirect(new URL(`/${home[1]}/`, url).toString(), 301);
+    const home = url.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(\/(index\.html)?)?$/i);
+    if (home && LANGS[home[1].toLowerCase()]) {
+      const lang = home[1].toLowerCase();
+      if (!home[2] || lang !== home[1]) return Response.redirect(new URL(`/${lang}/`, url).toString(), 301);
       // the English page, fetched afresh: its ETag would also stand for an
       // older dictionary
       const res = await env.ASSETS.fetch(new Request(new URL("/", url), { method: req.method }));
-      return beacon(translate(res, home[1]));
+      return beacon(translate(res, lang));
     }
     if (url.pathname === "/" && (req.method === "GET" || req.method === "HEAD")) {
       const lang = preferred(req);
@@ -214,13 +251,15 @@ export default {
   },
   // the crons (wrangler.jsonc's triggers): every quarter hour the ledger
   // the Stable channel is chosen from, then the day's Daily pick, and
-  // Discover's old counts pruned; every five minutes the newest, the
-  // Stable and the Daily release's files into R2
+  // Discover's and shared groups' old counts pruned; every five minutes
+  // the newest, the Stable and the Daily release's files into R2
   async scheduled(event, env, ctx) {
     if (event.cron === MIRROR_CRON) ctx.waitUntil(keepFiles(ctx, env));
     else {
       ctx.waitUntil(keepLedger(env, Date.now()).catch((e) => console.log("ledger", String(e))).then(() => keepDaily(env, Date.now())));
       ctx.waitUntil(prunePlugins(env));
+      ctx.waitUntil(pruneShares(env).catch((e) => console.log("shares", String(e))));
+      ctx.waitUntil(pruneGroups(env).catch((e) => console.log("groups", String(e))));
     }
   },
 };
@@ -316,16 +355,17 @@ async function capture(event, props) {
 
 // preferred is the home page's language for this browser: the one picked on
 // the page (the lang cookie), else the first of its Accept-Language that the
-// site has, else English.
+// site has, else English. Chinese written in Traditional characters (zh-TW,
+// zh-HK, zh-MO, zh-Hant) is zh-tw.
 export function preferred(req) {
-  const picked = (req.headers.get("Cookie") || "").match(/(?:^|;\s*)lang=([a-z]{2})/);
-  if (picked) return LANGS[picked[1]] ? picked[1] : "en";
+  const picked = (req.headers.get("Cookie") || "").match(/(?:^|;\s*)lang=([a-z]{2}(?:-[a-z]{2})?)/i);
+  if (picked) return LANGS[picked[1].toLowerCase()] ? picked[1].toLowerCase() : "en";
   const wants = (req.headers.get("Accept-Language") || "")
     .split(",")
     .map((p, i) => {
       const [tag, ...rest] = p.trim().toLowerCase().split(";");
       const q = rest.map((x) => x.trim()).find((x) => x.startsWith("q="));
-      return { lang: tag.split("-")[0], q: q ? parseFloat(q.slice(2)) || 0 : 1, i };
+      return { lang: /^zh-(tw|hk|mo|hant)\b/.test(tag) ? "zh-tw" : tag.split("-")[0], q: q ? parseFloat(q.slice(2)) || 0 : 1, i };
     })
     .filter((w) => w.lang && w.q > 0)
     .sort((a, b) => b.q - a.q || a.i - b.i);
@@ -365,7 +405,7 @@ function translate(res, lang) {
     rw.on('a[href^="/docs/"]', {
       element: (el) => {
         const href = el.getAttribute("href");
-        if (!href.startsWith(`/docs/${lang}/`)) el.setAttribute("href", `/docs/${lang}/` + href.slice(6));
+        if (!href.startsWith(`/docs/${docs}/`)) el.setAttribute("href", `/docs/${docs}/` + href.slice(6));
       },
     });
   return rw.transform(out);

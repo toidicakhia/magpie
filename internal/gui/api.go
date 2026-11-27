@@ -191,6 +191,23 @@ type fieldJSON struct {
 	// List is, in place of Options, which of the state's OptionLists the
 	// field offers, from 1 (shareOptions); 0 when Options is its own
 	List int `json:"list,omitempty"`
+	// Unserved are the user's routing groups a model field that offers
+	// groups doesn't, each with why (provider.UnservedGroups): its
+	// picker shows them, not to be picked
+	Unserved []unservedJSON `json:"unserved,omitempty"`
+}
+
+// unservedJSON is a routing group a model field doesn't offer: its value
+// as the field would take it, and why it isn't offered.
+type unservedJSON struct {
+	Value string   `json:"value"`
+	Label string   `json:"label"`
+	Icons []string `json:"icons,omitempty"`
+	Ref   string   `json:"ref"`
+	Why   string   `json:"why"`
+	// Pick: the gateway serves it, only the agent's lists leave it out;
+	// picked, it is put back in them (provider.ShowFor) and set
+	Pick bool `json:"pick,omitempty"`
 }
 
 type agentJSON struct {
@@ -327,6 +344,12 @@ type stateJSON struct {
 	// window offers to make theirs again; "" when magpie can save
 	ConfigBlocked string            `json:"configBlocked,omitempty"`
 	Settings      settings.Settings `json:"settings"`
+	// JSRoutings are the routings JS gateway plugins serve now
+	// ("<plugin>/<name>"), for every routing picker: here, not only in
+	// settingsJSON, which the page reads on Settings alone, so a page
+	// drawn from a state read anew (after each change) still offers them
+	// (guhailin3 on X, #6026)
+	JSRoutings []middleware.Routing `json:"jsRoutings"`
 	// FX is the dollar-to-yuan rate the cny currency choice shows costs at,
 	// here too (not only in settingsJSON) so a cost drawn before the reader
 	// ever opens Settings already converts, if cny was chosen last time.
@@ -436,9 +459,6 @@ type settingsJSON struct {
 	// PanelKeys is whether the quick panel's shortcut can be set here
 	// (panelkey.go)
 	PanelKeys panelKeysJSON `json:"panelKeys"`
-	// JSRoutings are the routings JS gateway plugins serve now
-	// ("<plugin>/<name>"), for the routing pickers
-	JSRoutings []middleware.Routing `json:"jsRoutings"`
 	// PublicURL is MAGPIE_PUBLIC_URL while other machines are let in
 	// (shared, or MAGPIE_ADDR on the network): where they reach the
 	// gateway, shown beside the local address agents here are pointed at
@@ -476,6 +496,9 @@ type settingsJSON struct {
 	// WSL is whether there is WSL to look in for agents (Windows), for
 	// Settings' Detect agents in WSL (#1264)
 	WSL bool `json:"wsl,omitempty"`
+	// GPU is Linux's GPU rendering row (gpurender.go): magpie's pick,
+	// this run's, and the WEBKIT_* variables the user set; nil elsewhere
+	GPU *gpuJSON `json:"gpu,omitempty"`
 	// Rekeyed is what an agent beyond loopback, given the sharing key,
 	// couldn't be set again with when sharing changed (agent.Rekey)
 	Rekeyed string `json:"rekeyed,omitempty"`
@@ -616,6 +639,10 @@ type settingsJSON struct {
 	CodexUsers []string `json:"codexUsers,omitempty"`
 	// and the Claude accounts, which Warm up now picks from
 	ClaudeUsers []string `json:"claudeUsers,omitempty"`
+	// and the agy CLI's: when its warm-up last started a pool's window,
+	// and the accounts Warm up now picks from
+	AgyWarmed *time.Time `json:"agyWarmed,omitempty"`
+	AgyUsers  []string   `json:"agyUsers,omitempty"`
 	// the Codexes here that kept the background compaction's table (and
 	// its share) out of the config at the last sync: too old for it
 	// (before 0.163.0-alpha.8), or of no known version (codex_async.go)
@@ -873,7 +900,6 @@ func settingsState() settingsJSON {
 	s.Log = tilde(applog.Current())
 	s.Builtins = builtinsState()
 	s.PanelKeys = panelKeysState()
-	s.JSRoutings = middleware.Routings()
 	s.OnNetwork = gateway.OnNetwork()
 	if list, env := gateway.AllowIPs(); env {
 		s.AllowIPsEnv, s.AllowIPsFromEnv = os.Getenv(gateway.AllowIPsEnv), list
@@ -887,6 +913,7 @@ func settingsState() settingsJSON {
 		s.PublicKind = gateway.URLKind(s.PublicURL)
 	}
 	s.WSL = runtime.GOOS == "windows"
+	s.GPU = gpuRow()
 	s.Web = webPage.Load()
 	s.GatewayOn, s.GatewayWhy = gatewayMode(s.Web)
 	s.GatewayPaused = pausedNow()
@@ -931,6 +958,7 @@ func settingsState() settingsJSON {
 	}
 	s.CodexWarmed, s.ClaudeWarmed = latest(provider.CodexWarmed()), latest(provider.ClaudeWarmed())
 	s.CodexUsers, s.ClaudeUsers = loginUsers("codex"), loginUsers("claude")
+	s.AgyWarmed, s.AgyUsers = latest(provider.AgyWarmed()), loginUsers("agy-cli")
 	s.CodexAsyncHeld = agent.CodexAsyncHeld()
 	s.CodexCompactKeys = codexKeysText(agent.CodexCompactHeld(""))
 	s.ClaudeCache = claudeCacheState()
@@ -1330,6 +1358,12 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// and the accent and wallpaper of the user's own (appearance.go),
 		// drawn before the first paint
 		boot["look"] = lookKey(s)
+		// and the time zone this magpie is set to (Settings' timeZone,
+		// JackyFill on X), the page's from the first line: tzshim.js
+		// puts Date and Intl in it, after bootPrefs, below
+		if s.TimeZone != "" && settings.ValidTimeZone(s.TimeZone) {
+			boot["timeZone"] = s.TimeZone
+		}
 		b, _ := json.Marshal(boot)
 		rw.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		rw.Header().Set("Cache-Control", "no-store")
@@ -1345,6 +1379,11 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			c, _ := json.Marshal(css)
 			out = append(out, `(function(){var e=document.createElement("style");e.id="lookCSS";e.textContent=`...)
 			out = append(append(out, c...), ";document.head.appendChild(e)})();\n"...)
+		}
+		if _, ok := boot["timeZone"]; ok {
+			if js, err := fs.ReadFile(staticFS(), "tzshim.js"); err == nil {
+				out = append(out, js...)
+			}
 		}
 		rw.Write(out)
 	})
@@ -1727,6 +1766,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	}
 	privacyModelRoutes(mux, w)
 	maskingRoutes(mux)
+	artifactRoutes(mux)
 	builtinRoutes(mux)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		access.MigrateLegacyLANKeyBestEffort()
@@ -2110,6 +2150,23 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// where in its window an agent compacts, a percent
+	// (settings.AgentCompactPcts): 0 is the agent's own default
+	mux.HandleFunc("POST /api/settings/agent-compact-pct", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Agent string
+			Pct   int
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetAgentCompactPct(in.Agent, in.Pct); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// the windows one agent is told, apart from every other's
 	// (settings.AgentContexts): Contexts replaces them, none takes them away
 	mux.HandleFunc("POST /api/settings/agent-contexts", func(rw http.ResponseWriter, r *http.Request) {
@@ -2270,6 +2327,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	// Settings › Proxy's Test (#2076): the address Cloudflare sees a request
 	// from through the proxy in force, and without it
 	mux.HandleFunc("POST /api/proxy/check", handleProxyCheck)
+	mux.HandleFunc("POST /api/egress/check", handleEgressCheck)
 	proxyRoutes(mux)
 	mux.HandleFunc("POST /api/pipelines/check", handlePipelineCheck)
 	mux.HandleFunc("POST /api/relay-check", handleRelayCheck)
@@ -2462,6 +2520,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		if err := provider.SetCodexResetLead(in.Minutes); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// which Codex resets are spent by themselves, by the days they have
+	// left: at least Least and at most Most, 0 for no bound (both 0 is
+	// every one, the default)
+	mux.HandleFunc("POST /api/settings/codex-reset-days", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Least, Most int }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetCodexResetDays(in.Least, in.Most); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -3390,6 +3463,7 @@ func stateSettings(s settings.Settings) settings.Settings {
 func state() stateJSON {
 	s := stateJSON{Agents: []agentJSON{}, Profiles: []profileJSON{}, Catalog: catalog.Source(), Settings: settings.Shared()} // only encoded, never changed
 	s.Settings = stateSettings(s.Settings)
+	s.JSRoutings = middleware.Routings()
 	// state() is asked for after nearly every click, so the rate — a
 	// network fetch once every TTL — is only worth its rare latency when
 	// cny is actually chosen; usd never looks at it
@@ -3829,6 +3903,11 @@ func fail(rw http.ResponseWriter, err error) {
 		if signedIn.Only {
 			out["code"] = "signed_in_only"
 		}
+	}
+	// a shared group usemagpie.ai took down, or no site to share on: an
+	// i18n.js key (said)
+	if code, said := groupGone(err); code != "" {
+		out["code"], out["said"] = code, said
 	}
 	// a text that isn't a group to import (laincatx on X), said in the
 	// reader's language

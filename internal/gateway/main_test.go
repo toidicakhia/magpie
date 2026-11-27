@@ -3,12 +3,14 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/coderun"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/gwtool"
@@ -24,6 +26,10 @@ import (
 const standInsEnv = "MAGPIE_GATEWAY_TEST_STAND_INS"
 
 func TestMain(m *testing.M) {
+	if coderun.Helping() {
+		// a run_code script: the test binary is the helper (hubCodeRun)
+		os.Exit(coderun.Main())
+	}
 	serveRotation()
 	groupsServed = provider.ServeGroups()
 	serveMiddleware()
@@ -34,6 +40,9 @@ func TestMain(m *testing.M) {
 	// the tests serve their Remote magpie from this process, which is
 	// then this magpie itself (remote_self_test.go turns it on again)
 	provider.LeaveOutSelf = false
+	// a test never reaches the network: a request from a LAN address
+	// (RemoteAddr 192.168.…) asks no DNS or computer for its name
+	clientNames.look = func(context.Context, netip.Addr) string { return "" }
 	code, err := isolatedTests(m)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

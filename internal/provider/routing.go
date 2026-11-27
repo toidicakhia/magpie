@@ -7,6 +7,7 @@ package provider
 // gone stale — or when an account says it has run out.
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -51,6 +52,11 @@ const (
 	// before it that renews meanwhile doesn't take its requests back
 	// (dzxx0496 on Discord; routes.Drain).
 	Drain = "drain"
+	// PaceDrain picks the key or account as Pace does, the one with the
+	// most left per hour until it renews, and then stays on it as Drain
+	// does until it is used up or refused, when it picks again
+	// (guhailin3 on X; routes.PaceDrain).
+	PaceDrain = "pace-drain"
 	// FreeExpiring spends free quota before paid, the free quota that is
 	// lost soonest first: a free account (FreePlan, or a model that costs
 	// nothing there, FreeModel) at its next reset or its credits' expiry,
@@ -88,6 +94,16 @@ var pluginRouting = lazyre.New(`^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // keeps one as saved, served now or not: one no plugin serves is tried in
 // its listed order.
 func PluginRouting(routing string) bool { return pluginRouting.MatchString(routing) }
+
+// GroupRouting says whether routing is one a routing group can be routed
+// by besides Smart (""): a built-in one, Manual, or a plugin's.
+func GroupRouting(routing string) bool {
+	switch routing {
+	case Ordered, Rotate, LeastUsed, Pace, Weighted, FreeFirst, Fastest, Cheapest, Drain, PaceDrain, FreeExpiring, SmallFirst, Manual:
+		return true
+	}
+	return PluginRouting(routing)
+}
 
 // SetRouting changes how a provider's requests spread over its keys or
 // accounts.
@@ -763,6 +779,22 @@ func (a Allowance) Full(model string, share float64, now time.Time) time.Time {
 func (a Allowance) Scoped(model string) bool {
 	model = strings.ToLower(model)
 	return slices.ContainsFunc(a, func(l Limit) bool { return (l.Model != "" || l.matches != nil) && l.applies(model) })
+}
+
+// PoolOf names the windows of the allowance that count some models only
+// and count model ("" when only the whole account's do): two models of one
+// account with the same PoolOf draw on one allowance, so a conversation
+// moved from one to the other spends what it would have spent anyway.
+func (a Allowance) PoolOf(model string) string {
+	model = strings.ToLower(model)
+	var ps []string
+	for i, l := range a {
+		if (l.Model != "" || l.matches != nil) && l.applies(model) {
+			ps = append(ps, cmp.Or(l.Name, l.Model, fmt.Sprint("#", i)))
+		}
+	}
+	slices.Sort(ps)
+	return strings.Join(slices.Compact(ps), "+")
 }
 
 // Pooled says whether a refusal of model for its allowance leaves the
